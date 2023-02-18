@@ -230,6 +230,7 @@ impl<T, R: ReferenceCount> RefCountedVector<T, R> {
     pub fn clear(&mut self) {
         if self.is_unique() {
             unsafe { self.inner.clear(); }
+            return;
         }
 
         *self = Self::with_capacity(self.capacity());
@@ -265,20 +266,24 @@ impl<T, R: ReferenceCount> RefCountedVector<T, R> {
         T: Clone,
     {
         let is_unique = self.is_unique();
-        let off_capacity = self.remaining_capacity() <= additional;
+        let enough_capacity = self.remaining_capacity() >= additional;
 
-        if !is_unique || off_capacity {
+        if !is_unique || !enough_capacity {
             // Hopefully the least common case.
-            self.realloc(is_unique, additional);
+            self.realloc(is_unique, enough_capacity, additional);
         }
     }
 
     #[cold]
-    fn realloc(&mut self, is_unique: bool, additional: usize)
+    fn realloc(&mut self, is_unique: bool, enough_capacity: bool, additional: usize)
     where
         T: Clone,
     {
-        let new_cap = grow_amortized(self.len(), additional);
+        let new_cap = if enough_capacity {
+            self.capacity()
+        } else {
+            grow_amortized(self.len(), additional)
+        };
 
         if is_unique {
             // The buffer is not large enough, we'll have to create a new one, however we
@@ -298,12 +303,12 @@ impl<T, R: ReferenceCount> RefCountedVector<T, R> {
                 }
 
                 self.inner = dst.inner;
+                return;
             }
         }
 
         // The slowest path, we pay for both the new allocation and the need to clone
         // each item one by one.
-        let new_cap = grow_amortized(self.len(), additional);
         self.inner = HeaderBuffer::try_from_slice(self.as_slice(), Some(new_cap)).unwrap();
     }
 
@@ -329,6 +334,10 @@ impl<T, R: ReferenceCount> RefCountedVector<T, R> {
 
     pub fn ref_count(&self) -> i32 {
         self.inner.ref_count()
+    }
+
+    pub(crate) fn addr(&self) -> *const u8 {
+        self.inner.header.as_ptr() as *const u8
     }
 }
 

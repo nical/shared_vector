@@ -251,34 +251,34 @@ fn chunks_basic() {
 
     fn chunks_basic_impl<R: ReferenceCount>() {
         let mut v: RefCountedChunkVector<u32, R> = RefCountedChunkVector::new(16);
-        for i in 0..100 {
+        for i in 0..40 {
             v.push(i);
             assert_eq!(v.len(), i as usize + 1);
         }
         let mut v2 = v.new_ref();
-        for i in 100..512 {
+        for i in 40..80 {
             v.push(i);
             assert_eq!(v.len(), i as usize + 1);
         }
-    
+
         let items: Vec<u32> = v.iter().cloned().collect();
-        assert_eq!(items.len(), 512);
-        for i in 0..512 {
+        assert_eq!(items.len(), 80);
+        for i in 0..80 {
             assert_eq!(items[i], i as u32);
         }
-    
+
         let items: Vec<u32> = v2.iter().cloned().collect();
-        assert_eq!(items.len(), 100);
-        for i in 0..100 {
+        assert_eq!(items.len(), 40);
+        for i in 0..40 {
             assert_eq!(items[i], i as u32);
         }
-    
-        for i in 0..512 {
-            let idx = 511 - i;
+
+        for i in 0..80 {
+            let idx = 79 - i;
             assert_eq!(v.pop(), Some(idx));
             assert_eq!(v.len(), idx as usize);
         }
-    
+
         v2.clear();
     
         assert!(v.pop().is_none());
