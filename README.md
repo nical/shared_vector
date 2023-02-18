@@ -2,8 +2,8 @@
 
 Efficient reference counted vector data structure is Rust.
 
-- [crate](crates.io/crates/shared_vector)
-- [doc](docs.rs/shared_vector)
+- [crate](https://crates.io/crates/shared_vector)
+- [doc](https://docs.rs/shared_vector)
 
 # License
 
