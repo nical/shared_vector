@@ -137,14 +137,9 @@ pub unsafe fn data_ptr<Header, T>(header: NonNull<Header>) -> *mut T {
 }
 
 const fn header_size<Header, T>() -> usize {
-    let align = mem::align_of::<T>();
-    let size = mem::size_of::<Header>();
-
-    if align > 0 {
-        ((size + align - 1) / align) * align
-    } else {
-        size
-    }
+    let a = mem::align_of::<T>();
+    let s = mem::size_of::<Header>();
+    if a > s { a } else { s }
 }
 
 pub fn buffer_layout<Header, T>(n: usize) -> Result<Layout, AllocError> {
@@ -152,14 +147,9 @@ pub fn buffer_layout<Header, T>(n: usize) -> Result<Layout, AllocError> {
         .checked_mul(n)
         .ok_or(AllocError::CapacityOverflow)?;
     let align = mem::align_of::<Header>().max(mem::align_of::<T>());
-    let header_size = mem::size_of::<Header>().max(mem::align_of::<T>());
+    let header_size = header_size::<Header, T>();
 
-    Layout::from_size_align(size + header_size, align).map_err(|_| AllocError::CapacityOverflow)
-}
-
-pub unsafe fn clear<Header: BufferHeader, T>(header: NonNull<Header>) {
-    let len = header.as_ref().len();
-    drop_items(data_ptr::<Header, T>(header), len)
+    Layout::from_size_align(header_size + size, align).map_err(|_| AllocError::CapacityOverflow)
 }
 
 pub unsafe fn drop_items<T>(mut ptr: *mut T, count: u32) {
@@ -533,7 +523,9 @@ impl<H: BufferHeader, T> HeaderBuffer<H, T> {
     pub unsafe fn clear(&mut self) {
         debug_assert!(self.is_unique());
         unsafe {
-            clear::<H, T>(self.header);
+            let len = self.header.as_ref().len();
+            drop_items(data_ptr::<H, T>(self.header), len);
+            self.header.as_mut().set_len(0);
         }
     }
 
@@ -571,7 +563,8 @@ impl<H: BufferHeader, T> Drop for HeaderBuffer<H, T> {
                 // we only need it for the atomic reference counted version but I don't expect
                 // this to make a measurable difference.
                 std::sync::atomic::fence(Acquire);
-                clear::<H, T>(self.header);
+                let len = self.header.as_ref().len();
+                drop_items(data_ptr::<H, T>(self.header), len);
                 dealloc::<H, T>(self.header, cap);
             }
         }

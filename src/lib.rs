@@ -70,7 +70,7 @@
 //! and shared versions.
 //!
 //! ```
-//! use immutable::UniqueVector;
+//! use shared_vector::UniqueVector;
 //! let mut builder = UniqueVector::new();
 //! builder.push(1u32);
 //! builder.push(2);
@@ -88,12 +88,12 @@
 //! are good building blocks for creating more complicated ones.
 //!
 //! ```
-//! use immutable::SharedVector;
-//! let mut a = shared_vector![1u32, 2, 3];
+//! use shared_vector::{SharedVector, rc_vector};
+//! let mut a = rc_vector![1u32, 2, 3];
 //!
 //! // `new_ref` (you can also use `clone`) creates a second reference to the same buffer.
 //! // future mutations of `a` won't affect `b`.
-//! let b = a.new_ref();
+//! let mut b = a.new_ref();
 //! // Because both a and b point to the same buffer, the next mutation allocates a new
 //! // copy under the hood.
 //! a.push(4);
