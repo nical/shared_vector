@@ -159,3 +159,4 @@ mod chunked;
 
 pub use vector::{SharedVector, AtomicSharedVector, UniqueVector};
 pub use chunked::{SharedChunkVector, AtomicSharedChunkVector, UniqueChunkVector};
+
