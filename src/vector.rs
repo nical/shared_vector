@@ -336,6 +336,7 @@ impl<T, R: ReferenceCount> RefCountedVector<T, R> {
         self.inner.ref_count()
     }
 
+    #[allow(unused)]
     pub(crate) fn addr(&self) -> *const u8 {
         self.inner.header.as_ptr() as *const u8
     }
