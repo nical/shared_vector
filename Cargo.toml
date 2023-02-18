@@ -1,0 +1,14 @@
+[package]
+name = "shared_vector"
+version = "0.1.0"
+edition = "2021"
+
+[dev-dependencies]
+criterion = "0.4"
+
+[[bench]]
+name = "vector"
+harness = false
+
+[profile.release]
+debug = true
