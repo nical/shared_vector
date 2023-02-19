@@ -76,6 +76,10 @@ fuzz_target!(|cmds: Vec<Cmd>| {
                 let val = (val % 1024).min(2048 - vectors[slot(idx)].len());
                 vectors[slot(idx)].reserve(val);
             }
+            Cmd::Convert { idx } => {
+                let a = std::mem::replace(&mut vectors[slot(idx)], UniqueVector::new());
+                vectors[slot(idx)] = a.into_shared().into_unique();
+            }
         }
     }
 });
