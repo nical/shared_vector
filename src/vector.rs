@@ -313,10 +313,16 @@ impl<T, R: ReferenceCount> RefCountedVector<T, R> {
     }
 
     /// Returns the concatenation of two vectors.
-    pub fn concatenate(mut self, mut other: Self) -> Self
+    pub fn concatenate(mut self, other: Self) -> Self
     where
         T: Clone,
     {
+        self.push_vector(other);
+
+        self
+    }
+
+    pub fn push_vector(&mut self, mut other: Self) where T: Clone {
         self.reserve(other.len());
 
         unsafe {
@@ -328,8 +334,6 @@ impl<T, R: ReferenceCount> RefCountedVector<T, R> {
                 self.inner.try_push_slice(other.as_slice()).unwrap();
             }
         }
-
-        self
     }
 
     pub fn ref_count(&self) -> i32 {
@@ -770,6 +774,22 @@ impl<T> UniqueVector<T> {
             self.realloc(additional);
         }
     }
+
+    pub fn push_vector(&mut self, mut other: Self) where T: Clone {
+        if other.is_empty() {
+            return;
+        }
+
+        self.reserve(other.len());
+
+        unsafe {
+            let src = other.data_ptr();
+            let dst = self.data_ptr().add(self.len());
+            ptr::copy_nonoverlapping(src, dst, other.len());
+            self.len += other.len;
+            other.len = 0
+        }
+    }
 }
 
 impl<T> Drop for UniqueVector<T> {
@@ -1073,4 +1093,10 @@ fn vector_macro() {
     let vec2: Vec<u32> = v2.iter().cloned().collect();
     assert_eq!(vec1, vec![0, 1, 2, 3, 4, 5]);
     assert_eq!(vec2, vec![42, 10]);
+}
+
+#[test]
+fn ensure_unique_empty() {
+    let mut v: SharedVector<u32> = SharedVector::new();
+    v.ensure_unique();
 }
