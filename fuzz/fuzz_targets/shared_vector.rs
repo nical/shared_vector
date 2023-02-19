@@ -75,8 +75,7 @@ fuzz_target!(|cmds: Vec<Cmd>| {
                 if let Some(elt) = vectors[slot(idx)].last_mut() { *elt = Box::new(2); }
             }
             Cmd::Reserve { idx, val } => {
-                let val = (val % 1024).min(2048 - vectors[slot(idx)].len());
-                vectors[slot(idx)].reserve(val);
+                vectors[slot(idx)].reserve(reserve_max(vectors[slot(idx)].len(), val));
             }
             Cmd::Convert { idx } => {
                 let a = std::mem::replace(&mut vectors[slot(idx)], SharedVector::new());
