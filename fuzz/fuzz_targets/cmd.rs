@@ -23,6 +23,7 @@ pub enum Cmd {
     FirstMut { idx: usize },
     LastMut { idx: usize, },
     Reserve { idx: usize, val: usize },
+    Convert { idx: usize },
 }
 
 fn cmd_to_string(vec_type: &str, cmd: Cmd) -> String {
@@ -93,6 +94,24 @@ fn cmd_to_string(vec_type: &str, cmd: Cmd) -> String {
         }
         Cmd::Reserve { idx, val } => {
             format!("vectors[{}].reserve(({} % 1024).min(2048 - vectors[{}].len()));", slot(idx), val, slot(idx))
+        }
+        Cmd::Convert { idx } => {
+            let conv = match vec_type {
+                "SharedVector" => "into_unique",
+                "AtomicSharedVector" => "into_unique",
+                "UniqueVector" => "into_shared",
+                _ => panic!("unknwon type {vec_type}"),
+            };
+            let inv = match vec_type {
+                "SharedVector" => "into_shared",
+                "AtomicSharedVector" => "into_shared",
+                "UniqueVector" => "into_unique",
+                _ => panic!("unknwon type {vec_type}"),
+            };
+            let idx = slot(idx);
+            let a = format!("let a = std::mem::replace(&mut vectors[{idx}], {vec_type}::new());");
+            let b = format!("vectors[{idx}] = a.{conv}().{inv}();");
+            format!("{a}\n{b}")
         }
     }
 }
