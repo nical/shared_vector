@@ -1,6 +1,9 @@
 use arbitrary::Arbitrary;
 
 pub fn slot(idx: usize) -> usize { idx % 4 }
+pub fn reserve_max(len: usize, additional: usize) -> usize {
+    (additional % 1024).min(2048 - len.min(2048))
+}
 
 #[derive(Arbitrary, Copy, Clone, Debug)]
 pub enum Cmd {
@@ -69,7 +72,9 @@ fn cmd_to_string(vec_type: &str, cmd: Cmd) -> String {
             format!("vectors[{}].ensure_unique();", slot(idx))
         }
         Cmd::PushVector { src_idx, dst_idx } => {
-            format!("vectors[{}].push_vector(std::mem::replace(&mut vectors[{}], {vec_type}::new()));", slot(dst_idx), slot(src_idx))
+            let a = format!("let v = take(&mut vectors[{}]);", slot(src_idx));
+            let b = format!("vectors[{}].push_vector(v);", slot(dst_idx));
+            format!("{a}\n    {b}")
         }
         Cmd::WithCapacity { idx, cap } => {
             format!("vectors[{}] = {vec_type}::with_capacity({});", slot(idx), cap % 1024)
@@ -93,7 +98,9 @@ fn cmd_to_string(vec_type: &str, cmd: Cmd) -> String {
             format!("if let Some(elt) = vectors[{}].last_mut() {{ *elt = Box::new(2); }} ", slot(idx))
         }
         Cmd::Reserve { idx, val } => {
-            format!("vectors[{}].reserve(({} % 1024).min(2048 - vectors[{}].len()));", slot(idx), val, slot(idx))
+            let val = val % 1024;
+            let idx = slot(idx);
+            format!("vectors[{idx}].reserve(reserve_max(vectors[{idx}].len(), {val}));")
         }
         Cmd::Convert { idx } => {
             let conv = match vec_type {
@@ -109,9 +116,9 @@ fn cmd_to_string(vec_type: &str, cmd: Cmd) -> String {
                 _ => panic!("unknwon type {vec_type}"),
             };
             let idx = slot(idx);
-            let a = format!("let a = std::mem::replace(&mut vectors[{idx}], {vec_type}::new());");
+            let a = format!("let a = take(&mut vectors[{idx}]);");
             let b = format!("vectors[{idx}] = a.{conv}().{inv}();");
-            format!("{a}\n{b}")
+            format!("{a}\n    {b}")
         }
     }
 }
@@ -119,14 +126,20 @@ fn cmd_to_string(vec_type: &str, cmd: Cmd) -> String {
 #[allow(unused)]
 pub fn cmds_to_src(vec_type: &str, cmds: &[Cmd]) {
     println!("// -------");
-    println!("let mut vectors: [{vec_type}<Box<u32>>; 4] = [");
-    println!("  {vec_type}::new(),");
-    println!("  {vec_type}::new(),");
-    println!("  {vec_type}::new(),");
-    println!("  {vec_type}::new(),");
-    println!("];");
+    println!("    fn reserve_max(len: usize, additional: usize) -> usize {{");
+    println!("        additional.min(2048 - len.min(2048))");
+    println!("    }}");
+    println!("    fn take<T>(place: &mut {vec_type}<T>) -> {vec_type}<T> {{");
+    println!("        std::mem::replace(place, {vec_type}::new())");
+    println!("    }}");
+    println!("    let mut vectors: [{vec_type}<Box<u32>>; 4] = [");
+    println!("        {vec_type}::new(),");
+    println!("        {vec_type}::new(),");
+    println!("        {vec_type}::new(),");
+    println!("        {vec_type}::new(),");
+    println!("    ];");
     for cmd in cmds {
-        println!("{}", cmd_to_string(vec_type, *cmd));
+        println!("    {}", cmd_to_string(vec_type, *cmd));
     }
     println!("// -------");
 }
