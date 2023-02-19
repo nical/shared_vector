@@ -1,0 +1,34 @@
+[package]
+name = "shared_vector-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1.2.3", features = ["derive"] }
+
+[dependencies.shared_vector]
+path = ".."
+
+# Prevent this from interfering with workspaces
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "shared_vector"
+path = "fuzz_targets/shared_vector.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "unique_vector"
+path = "fuzz_targets/unique_vector.rs"
+test = false
+doc = false
