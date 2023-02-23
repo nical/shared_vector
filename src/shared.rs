@@ -4,22 +4,22 @@ use std::ptr::NonNull;
 use std::fmt::Debug;
 
 use crate::unique::UniqueVector;
-use crate::raw::{AllocError, BufferSize, HeaderBuffer};
-use crate::{ReferenceCount, AtomicRefCount, DefaultRefCount, grow_amortized};
+use crate::raw::{AllocError, BufferSize, HeaderBuffer, GlobalAllocator, Allocator};
+use crate::{RefCount, AtomicRefCount, DefaultRefCount, grow_amortized};
 
 /// A heap allocated, atomically reference counted, immutable contiguous buffer containing elements of type `T`.
 ///
 /// <svg width="280" height="120" viewBox="0 0 74.08 31.75" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="a"><stop offset="0" stop-color="#491c9c"/><stop offset="1" stop-color="#d54b27"/></linearGradient><linearGradient xlink:href="#a" id="b" gradientUnits="userSpaceOnUse" x1="6.27" y1="34.86" x2="87.72" y2="13.24" gradientTransform="translate(-2.64 -18.48)"/></defs><rect width="10.57" height="10.66" x="2.66" y="18.48" ry="1.37" fill="#3dbdaa"/><rect width="10.57" height="10.66" x="15.88" y="18.52" ry="1.37" fill="#3dbdaa"/><rect width="10.57" height="10.66" x="29.11" y="18.52" ry="1.37" fill="#3dbdaa"/><circle cx="33.87" cy="18.56" r=".79" fill="#666"/><circle cx="7.41" cy="18.56" r=".79" fill="#666"/><circle cx="20.64" cy="18.56" r=".79" fill="#666"/><path d="M7.38 18.54c.03-2.63-3.41-2.66-3.41-5.31" fill="none" stroke="#999" stroke-width=".86" stroke-linecap="round"/><path d="M20.64 18.56c0-2.91-15.35-1.36-15.35-5.33" fill="none" stroke="#999" stroke-width=".86" stroke-linecap="round"/><path d="M33.87 18.56c0-3.97-27.26-2.68-27.26-5.33" fill="none" stroke="#999" stroke-width=".86" stroke-linecap="round"/><rect width="68.79" height="10.58" x="2.65" y="2.68" ry="1.37" fill="url(#b)"/><rect width="15.35" height="9.51" x="3.18" y="3.21" ry=".9" fill="#78a2d4"/><rect width="9.26" height="9.51" x="19.85" y="3.2" ry=".9" fill="#eaa577"/><rect width="9.26" height="9.51" x="29.64" y="3.22" ry=".9" fill="#eaa577"/><rect width="9.26" height="9.51" x="39.43" y="3.22" ry=".9" fill="#eaa577"/><rect width="9.26" height="9.51" x="49.22" y="3.21" ry=".9" fill="#eaa577"/><circle cx="62.84" cy="7.97" r=".66" fill="#eaa577"/><circle cx="64.7" cy="7.97" r=".66" fill="#eaa577"/><circle cx="66.55" cy="7.97" r=".66" fill="#eaa577"/></svg>
 ///
 /// See [RefCountedVector].
-pub type AtomicSharedVector<T> = RefCountedVector<T, AtomicRefCount>;
+pub type AtomicSharedVector<T, A = GlobalAllocator> = RefCountedVector<T, AtomicRefCount, A>;
 
 /// A heap allocated, reference counted, immutable contiguous buffer containing elements of type `T`.
 ///
 /// <svg width="280" height="120" viewBox="0 0 74.08 31.75" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="a"><stop offset="0" stop-color="#491c9c"/><stop offset="1" stop-color="#d54b27"/></linearGradient><linearGradient xlink:href="#a" id="b" gradientUnits="userSpaceOnUse" x1="6.27" y1="34.86" x2="87.72" y2="13.24" gradientTransform="translate(-2.64 -18.48)"/></defs><rect width="10.57" height="10.66" x="2.66" y="18.48" ry="1.37" fill="#3dbdaa"/><rect width="10.57" height="10.66" x="15.88" y="18.52" ry="1.37" fill="#3dbdaa"/><rect width="10.57" height="10.66" x="29.11" y="18.52" ry="1.37" fill="#3dbdaa"/><circle cx="33.87" cy="18.56" r=".79" fill="#666"/><circle cx="7.41" cy="18.56" r=".79" fill="#666"/><circle cx="20.64" cy="18.56" r=".79" fill="#666"/><path d="M7.38 18.54c.03-2.63-3.41-2.66-3.41-5.31" fill="none" stroke="#999" stroke-width=".86" stroke-linecap="round"/><path d="M20.64 18.56c0-2.91-15.35-1.36-15.35-5.33" fill="none" stroke="#999" stroke-width=".86" stroke-linecap="round"/><path d="M33.87 18.56c0-3.97-27.26-2.68-27.26-5.33" fill="none" stroke="#999" stroke-width=".86" stroke-linecap="round"/><rect width="68.79" height="10.58" x="2.65" y="2.68" ry="1.37" fill="url(#b)"/><rect width="15.35" height="9.51" x="3.18" y="3.21" ry=".9" fill="#78a2d4"/><rect width="9.26" height="9.51" x="19.85" y="3.2" ry=".9" fill="#eaa577"/><rect width="9.26" height="9.51" x="29.64" y="3.22" ry=".9" fill="#eaa577"/><rect width="9.26" height="9.51" x="39.43" y="3.22" ry=".9" fill="#eaa577"/><rect width="9.26" height="9.51" x="49.22" y="3.21" ry=".9" fill="#eaa577"/><circle cx="62.84" cy="7.97" r=".66" fill="#eaa577"/><circle cx="64.7" cy="7.97" r=".66" fill="#eaa577"/><circle cx="66.55" cy="7.97" r=".66" fill="#eaa577"/></svg>
 ///
 /// See [RefCountedVector].
-pub type SharedVector<T> = RefCountedVector<T, DefaultRefCount>;
+pub type SharedVector<T, A = GlobalAllocator> = RefCountedVector<T, DefaultRefCount, A>;
 
 /// A heap allocated, reference counted, immutable contiguous buffer containing elements of type `T`.
 ///
@@ -37,44 +37,46 @@ pub type SharedVector<T> = RefCountedVector<T, DefaultRefCount>;
 /// In other words, this type behaves like an [immutable (or persistent) data structure](https://en.wikipedia.org/wiki/Persistent_data_structure)
 /// Actual mutability only happens under the hood as an optimization when a single reference exists.
 #[repr(transparent)]
-pub struct RefCountedVector<T, R: ReferenceCount = DefaultRefCount> {
-    pub(crate) inner: HeaderBuffer<R::Header, T>,
+pub struct RefCountedVector<T, R: RefCount, A: Allocator = GlobalAllocator> {
+    pub(crate) inner: HeaderBuffer<T, R, A>,
 }
 
-impl<T, R: ReferenceCount> RefCountedVector<T, R> {
+impl<T, R: RefCount> RefCountedVector<T, R, GlobalAllocator> {
     /// Creates an empty shared buffer without allocating memory.
     #[inline]
-    pub fn new() -> Self {
+    pub fn new() -> RefCountedVector<T, R, GlobalAllocator> {
         RefCountedVector {
-            inner: HeaderBuffer::new_empty().unwrap(),
+            inner: HeaderBuffer::try_with_capacity(0, GlobalAllocator).unwrap(),
         }
     }
 
     /// Constructs a new, empty vector with at least the specified capacity.
     #[inline]
-    pub fn with_capacity(cap: usize) -> Self {
+    pub fn with_capacity(cap: usize) -> RefCountedVector<T, R, GlobalAllocator> {
         RefCountedVector {
-            inner: HeaderBuffer::try_with_capacity(cap).unwrap(),
+            inner: HeaderBuffer::try_with_capacity(cap, GlobalAllocator).unwrap(),
         }
-    }
-
-    /// Tries to construct a new, empty vector with at least the specified capacity.
-    #[inline]
-    pub fn try_with_capacity(cap: usize) -> Result<Self, AllocError> {
-        Ok(RefCountedVector {
-            inner: HeaderBuffer::try_with_capacity(cap)?,
-        })
     }
 
     /// Clones the contents of a slice into a new vector.
     #[inline]
-    pub fn from_slice(data: &[T]) -> Self
+    pub fn from_slice(data: &[T]) -> RefCountedVector<T, R, GlobalAllocator>
     where
         T: Clone,
     {
         RefCountedVector {
-            inner: HeaderBuffer::try_from_slice(data, None).unwrap(),
+            inner: HeaderBuffer::try_from_slice(data, None, GlobalAllocator).unwrap(),
         }
+    }
+}
+
+impl<T, R: RefCount, A: Allocator> RefCountedVector<T, R, A> {
+    /// Tries to construct a new, empty vector with at least the specified capacity.
+    #[inline]
+    pub fn try_with_allocator(cap: usize, allocator: A) -> Result<Self, AllocError> {
+        Ok(RefCountedVector {
+            inner: HeaderBuffer::try_with_capacity(cap, allocator)?,
+        })
     }
 
     /// Returns `true` if the vector contains no elements.
@@ -162,7 +164,7 @@ impl<T, R: ReferenceCount> RefCountedVector<T, R> {
 
     /// Converts this RefCountedVector into an immutable one, allocating a new copy if there are other references.
     #[inline]
-    pub fn into_unique(mut self) -> UniqueVector<T>
+    pub fn into_unique(mut self) -> UniqueVector<T, A>
     where
         T: Clone,
     {
@@ -172,10 +174,11 @@ impl<T, R: ReferenceCount> RefCountedVector<T, R> {
             let data = NonNull::new_unchecked(self.inner.data_ptr());
             let len = self.len() as BufferSize;
             let cap = self.capacity() as BufferSize;
+            let allocator = self.inner.header.as_ref().allocator.clone();
 
             mem::forget(self);
 
-            UniqueVector { data, len, cap }
+            UniqueVector { data, len, cap, allocator }
         }
     }
 
@@ -276,7 +279,7 @@ impl<T, R: ReferenceCount> RefCountedVector<T, R> {
             return;
         }
 
-        *self = Self::with_capacity(self.capacity());
+        *self = Self::try_with_allocator(self.capacity(), self.inner.clone_allocator()).unwrap();
     }
 
     /// Returns true if the two vectors share the same underlying storage.
@@ -422,12 +425,13 @@ impl<T, R: ReferenceCount> RefCountedVector<T, R> {
     where
         T: Clone,
     {
+        let allocator = self.inner.clone_allocator();
         if is_unique {
             // The buffer is not large enough, we'll have to create a new one, however we
             // know that we have the only reference to it so we'll move the data with
             // a simple memcpy instead of cloning it.
             unsafe {
-                let mut dst = Self::try_with_capacity(new_cap)?;
+                let mut dst = Self::try_with_allocator(new_cap, allocator)?;
                 let len = self.len();
                 if len > 0 {
                     ptr::copy_nonoverlapping(
@@ -446,7 +450,7 @@ impl<T, R: ReferenceCount> RefCountedVector<T, R> {
 
         // The slowest path, we pay for both the new allocation and the need to clone
         // each item one by one.
-        self.inner = HeaderBuffer::try_from_slice(self.as_slice(), Some(new_cap))?;
+        self.inner = HeaderBuffer::try_from_slice(self.as_slice(), Some(new_cap), allocator)?;
 
         Ok(())
     }
@@ -475,13 +479,9 @@ impl<T, R: ReferenceCount> RefCountedVector<T, R> {
             } else {
                 // Slow path, clone each item.
                 self.inner.try_push_slice(other.as_slice()).unwrap();
-                *other = Self::with_capacity(other.capacity());
+                *other = Self::try_with_allocator(other.capacity(), self.inner.clone_allocator()).unwrap();
             }
         }
-    }
-
-    pub fn ref_count(&self) -> i32 {
-        self.inner.ref_count()
     }
 
     #[allow(unused)]
@@ -490,39 +490,39 @@ impl<T, R: ReferenceCount> RefCountedVector<T, R> {
     }
 }
 
-unsafe impl<T: Sync> Send for AtomicSharedVector<T> {}
+unsafe impl<T: Sync, A: Allocator> Send for AtomicSharedVector<T, A> {}
 
-impl<T, R: ReferenceCount> Clone for RefCountedVector<T, R> {
+impl<T, R: RefCount, A: Allocator> Clone for RefCountedVector<T, R, A> {
     fn clone(&self) -> Self {
         self.new_ref()
     }
 }
 
-impl<T: PartialEq<T>, R: ReferenceCount> PartialEq<RefCountedVector<T, R>> for RefCountedVector<T, R> {
+impl<T: PartialEq<T>, R: RefCount, A: Allocator> PartialEq<RefCountedVector<T, R, A>> for RefCountedVector<T, R, A> {
     fn eq(&self, other: &Self) -> bool {
         self.ptr_eq(other) || self.as_slice() == other.as_slice()
     }
 }
 
-impl<T: PartialEq<T>, R: ReferenceCount> PartialEq<&[T]> for RefCountedVector<T, R> {
+impl<T: PartialEq<T>, R: RefCount, A: Allocator> PartialEq<&[T]> for RefCountedVector<T, R, A> {
     fn eq(&self, other: &&[T]) -> bool {
         self.as_slice() == *other
     }
 }
 
-impl<T, R: ReferenceCount> AsRef<[T]> for RefCountedVector<T, R> {
+impl<T, R: RefCount, A: Allocator> AsRef<[T]> for RefCountedVector<T, R, A> {
     fn as_ref(&self) -> &[T] {
         self.as_slice()
     }
 }
 
-impl<T, R: ReferenceCount> Default for RefCountedVector<T, R> {
+impl<T, R: RefCount> Default for RefCountedVector<T, R, GlobalAllocator> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<'a, T, R: ReferenceCount> IntoIterator for &'a RefCountedVector<T, R> {
+impl<'a, T, R: RefCount, A: Allocator> IntoIterator for &'a RefCountedVector<T, R, A> {
     type Item = &'a T;
     type IntoIter = std::slice::Iter<'a, T>;
     fn into_iter(self) -> std::slice::Iter<'a, T> {
@@ -530,7 +530,7 @@ impl<'a, T, R: ReferenceCount> IntoIterator for &'a RefCountedVector<T, R> {
     }
 }
 
-impl<'a, T: Clone, R: ReferenceCount> IntoIterator for &'a mut RefCountedVector<T, R> {
+impl<'a, T: Clone, R: RefCount, A: Allocator> IntoIterator for &'a mut RefCountedVector<T, R, A> {
     type Item = &'a mut T;
     type IntoIter = std::slice::IterMut<'a, T>;
     fn into_iter(self) -> std::slice::IterMut<'a, T> {
@@ -538,7 +538,7 @@ impl<'a, T: Clone, R: ReferenceCount> IntoIterator for &'a mut RefCountedVector<
     }
 }
 
-impl<T, R: ReferenceCount, I> Index<I> for RefCountedVector<T, R>
+impl<T, R: RefCount, A: Allocator, I> Index<I> for RefCountedVector<T, R, A>
 where
     I: std::slice::SliceIndex<[T]>,
 {
@@ -548,7 +548,7 @@ where
     }
 }
 
-impl<T, R: ReferenceCount, I> IndexMut<I> for RefCountedVector<T, R>
+impl<T, R: RefCount, A: Allocator, I> IndexMut<I> for RefCountedVector<T, R, A>
 where
     T: Clone,
     I: std::slice::SliceIndex<[T]>,
@@ -558,20 +558,20 @@ where
     }
 }
 
-impl<T, R: ReferenceCount> Deref for RefCountedVector<T, R> {
+impl<T, R: RefCount, A: Allocator> Deref for RefCountedVector<T, R, A> {
     type Target = [T];
     fn deref(&self) -> &[T] {
         self.as_slice()
     }
 }
 
-impl<T: Clone, R: ReferenceCount> DerefMut for RefCountedVector<T, R> {
+impl<T: Clone, R: RefCount, A: Allocator> DerefMut for RefCountedVector<T, R, A> {
     fn deref_mut(&mut self) -> &mut [T] {
         self.as_mut_slice()
     }
 }
 
-impl<T: Debug, R: ReferenceCount> Debug for RefCountedVector<T, R> {
+impl<T: Debug, R: RefCount, A: Allocator> Debug for RefCountedVector<T, R, A> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         self.as_slice().fmt(f)
     }
@@ -632,7 +632,7 @@ fn basic_shared() {
     basic_shared_impl::<DefaultRefCount>();
     basic_shared_impl::<AtomicRefCount>();
 
-    fn basic_shared_impl<R: ReferenceCount>() {
+    fn basic_shared_impl<R: RefCount>() {
         let mut a: RefCountedVector<Box<u32>, R> = RefCountedVector::with_capacity(64);
         a.push(num(1));
         a.push(num(2));
@@ -661,16 +661,8 @@ fn basic_shared() {
 
 #[test]
 fn empty_buffer() {
-    // TODO: The behavior is different for SharedVector because it does not use a global header.
-    let a: AtomicSharedVector<u32> = AtomicSharedVector::new();
-    assert!(!a.is_unique());
-    {
-        let b: AtomicSharedVector<u32> = AtomicSharedVector::new();
-        assert!(!b.is_unique());
-        assert!(a.ptr_eq(&b));
-    }
-
-    assert!(!a.is_unique());
+    let _: AtomicSharedVector<u32> = AtomicSharedVector::new();
+    let _: AtomicSharedVector<u32> = AtomicSharedVector::new();
 
     let _: SharedVector<()> = SharedVector::new();
     let _: SharedVector<()> = SharedVector::new();
