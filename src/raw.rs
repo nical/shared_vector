@@ -1,4 +1,4 @@
-use std::alloc::{self, Layout};
+use std::alloc::{Layout};
 use std::marker::PhantomData;
 use std::mem;
 use std::ptr::{self, NonNull};
@@ -6,16 +6,15 @@ use std::sync::atomic::{AtomicI32, Ordering::{Acquire, Release, Relaxed}};
 
 pub type BufferSize = u32;
 
-pub trait BufferHeader {
-    fn with_capacity(cap: BufferSize) -> Self;
+pub trait RefCount {
     unsafe fn add_ref(this: NonNull<Self>);
     unsafe fn release_ref(this:  NonNull<Self>) -> bool;
-    fn len(&self) -> BufferSize;
-    fn set_len(&mut self, val: BufferSize);
-    fn capacity(&self) -> BufferSize;
-    fn ref_count(&self) -> i32;
-    unsafe fn global() -> Option<NonNull<Self>>  { None }
+    fn new(count: i32) -> Self;
+    fn get(this: NonNull<Self>) -> i32;
 }
+
+pub struct DefaultRefCount(i32);
+pub struct AtomicRefCount(AtomicI32);
 
 #[repr(C)]
 pub struct VecHeader {
@@ -24,83 +23,83 @@ pub struct VecHeader {
 }
 
 pub struct HeaderInternal<R, A> {
-    vec: VecHeader,
-    ref_count: R,
-    allocator: A,
+    pub(crate) vec: VecHeader,
+    pub(crate) ref_count: R,
+    pub(crate) allocator: A,
 }
 
-// SAFETY: UniqueVector relies on AtomicHeader and Header having the same representation.
-#[repr(C)]
-pub struct AtomicHeader {
-    pub vec: VecHeader,
-    pub ref_count: AtomicI32,
-    pub _pad: u32,
-}
-
-impl BufferHeader for AtomicHeader {
-    fn with_capacity(cap: BufferSize) -> Self {
-        AtomicHeader {
-            vec: VecHeader { cap, len: 0 },
-            ref_count: AtomicI32::new(1),
-            _pad: 0,
-        }
+impl<R, A> HeaderInternal<R, A> {
+    #[inline]
+    unsafe fn add_ref(this: NonNull<Self>) where R: RefCount {
+        R::add_ref(NonNull::new_unchecked(&mut (*this.as_ptr()).ref_count))
     }
+    #[inline]
+    unsafe fn release_ref(this:  NonNull<Self>) -> bool where R: RefCount {
+        R::release_ref(NonNull::new_unchecked(&mut (*this.as_ptr()).ref_count))
+    }
+    #[inline]
+    fn len(&self) -> BufferSize {
+        self.vec.len
+    }
+    #[inline]
+    fn set_len(&mut self, val: BufferSize) {
+        self.vec.len = val;
+    }
+    fn capacity(&self) -> BufferSize {
+        self.vec.cap
+    }
+    #[inline]
+    fn is_unique(this:  NonNull<Self>) -> bool where R: RefCount {
+        unsafe { R::get(NonNull::new_unchecked(&mut (*this.as_ptr()).ref_count)) == 1 }
+    }
+}
+
+impl RefCount for AtomicRefCount {
     #[inline]
     unsafe fn add_ref(this: NonNull<Self>) {
         // Relaxed ordering is OK since the presence of the existing reference
         // prevents threads from deleting the buffer.
-        this.as_ref().ref_count.fetch_add(1, Relaxed);
+        this.as_ref().0.fetch_add(1, Relaxed);
     }
+
     #[inline]
     unsafe fn release_ref(this:  NonNull<Self>) -> bool {
-        this.as_ref().ref_count.fetch_sub(1, Release) == 1
+        this.as_ref().0.fetch_sub(1, Release) == 1
     }
-    #[inline] fn len(&self) -> BufferSize { self.vec.len }
-    #[inline] fn set_len(&mut self, val: BufferSize) { self.vec.len = val; }
-    #[inline] fn capacity(&self) -> BufferSize { self.vec.cap }
-    #[inline] fn ref_count(&self) -> i32 {
-        self.ref_count.load(Acquire)
-    }
-    unsafe fn global() -> Option<NonNull<Self>> {
-        NonNull::new(&GLOBAL_EMPTY_BUFFER_ATOMIC as *const Self as *mut Self)
-    }
-}
 
-#[repr(C)]
-pub struct Header {
-    pub vec: VecHeader,
-    pub ref_count: i32,
-    pub _pad: u32,
-}
-
-impl BufferHeader for Header {
-    fn with_capacity(cap: BufferSize) -> Self {
-        Header {
-            vec: VecHeader { cap, len: 0 },
-            ref_count: 1,
-            _pad: 0,
-        }
-    }
     #[inline]
-    unsafe fn add_ref(mut this: NonNull<Self>) {
-        this.as_mut().ref_count += 1;
+    fn new(val: i32) -> Self {
+        AtomicRefCount(AtomicI32::new(val))
     }
+
     #[inline]
-    unsafe fn release_ref(mut this:  NonNull<Self>) -> bool {
-        let p = this.as_mut();
-        p.ref_count -= 1;
-        p.ref_count == 0
-    }
-    #[inline] fn len(&self) -> BufferSize { self.vec.len }
-    #[inline] fn set_len(&mut self, val: BufferSize) { self.vec.len = val; }
-    #[inline] fn capacity(&self) -> BufferSize { self.vec.cap }
-    #[inline] fn ref_count(&self) -> i32 { self.ref_count }
-    unsafe fn global() -> Option<NonNull<Self>> {
-        None
-        //NonNull::new(&GLOBAL_EMPTY_BUFFER as *const Self as *mut Self)
+    fn get(this: NonNull<Self>) -> i32 {
+        unsafe { this.as_ref().0.load(Relaxed) }
     }
 }
 
+impl RefCount for DefaultRefCount {
+    #[inline]
+    unsafe fn add_ref(this: NonNull<Self>) {
+        (*this.as_ptr()).0 += 1;
+    }
+
+    #[inline]
+    unsafe fn release_ref(this:  NonNull<Self>) -> bool {
+        (*this.as_ptr()).0 -= 1;
+        this.as_ref().0 == 0
+    }
+
+    #[inline]
+    fn new(val: i32) -> Self {
+        DefaultRefCount(val)
+    }
+
+    #[inline]
+    fn get(this: NonNull<Self>) -> i32 {
+        unsafe { this.as_ref().0 }
+    }
+}
 
 // // A global empty header so that we can create empty shared buffers with allocating memory.
 // static GLOBAL_EMPTY_BUFFER: Header = Header {
@@ -115,15 +114,15 @@ impl BufferHeader for Header {
 // };
 
 // A global empty header so that we can create empty shared buffers with allocating memory.
-static GLOBAL_EMPTY_BUFFER_ATOMIC: AtomicHeader = AtomicHeader {
-    vec: VecHeader { cap: 0, len: 0 },
-    // The initial reference count is 1 so that it never gets to zero.
-    // this is important in order to ensure that the global empty buffer
-    // is never considered mutable (any live handle will contribute at least one reference
-    // meaning the ref_count should always be observably more than 1 if a RawBuffer points to it.)
-    ref_count: AtomicI32::new(1),
-    _pad: 0,
-};
+//static GLOBAL_EMPTY_BUFFER_ATOMIC: AtomicHeader = AtomicHeader {
+//    vec: VecHeader { cap: 0, len: 0 },
+//    // The initial reference count is 1 so that it never gets to zero.
+//    // this is important in order to ensure that the global empty buffer
+//    // is never considered mutable (any live handle will contribute at least one reference
+//    // meaning the ref_count should always be observably more than 1 if a RawBuffer points to it.)
+//    ref_count: AtomicRefCount(AtomicI32::new(1)),
+//    allocator: GlobalAllocator,
+//};
 
 /// Error type for APIs with fallible heap allocation
 #[derive(Debug)]
@@ -170,10 +169,10 @@ pub unsafe fn drop_items<T>(mut ptr: *mut T, count: u32) {
     }
 }
 
-pub unsafe fn dealloc<Header: BufferHeader, T>(ptr: NonNull<Header>, cap: BufferSize) {
-    let layout = buffer_layout::<Header, T>(cap as usize).unwrap();
-
-    alloc::dealloc(ptr.as_ptr() as *mut u8, layout);
+pub unsafe fn dealloc<T, R, A: Allocator>(mut ptr: NonNull<HeaderInternal<R, A>>, cap: BufferSize) {
+    let layout = buffer_layout::<HeaderInternal<R, A>, T>(cap as usize).unwrap();
+    let allocator = ptr::read(&ptr.as_mut().allocator);
+    allocator.dealloc(ptr.cast::<u8>(), layout);
 }
 
 #[cold]
@@ -183,32 +182,32 @@ fn capacity_error() -> AllocError {
 
 
 #[repr(transparent)]
-pub struct HeaderBuffer<H: BufferHeader, T> {
-    pub header: NonNull<H>,
+pub struct HeaderBuffer<T, R: RefCount, A: Allocator> {
+    pub header: NonNull<HeaderInternal<R, A>>,
     _marker: PhantomData<T>,
 }
 
-impl<H: BufferHeader, T> HeaderBuffer<H, T> {
-    pub fn new_empty() -> Result<Self, AllocError> {
-        Self::try_with_capacity(0)
-    }
-
-    pub unsafe fn from_raw(ptr: NonNull<H>) -> Self {
+impl<T, R: RefCount, A: Allocator> HeaderBuffer<T, R, A> {
+    pub unsafe fn from_raw(ptr: NonNull<HeaderInternal<R, A>>) -> Self {
         HeaderBuffer { header: ptr, _marker: PhantomData }
     }
 
     #[inline(never)]
-    pub fn try_with_capacity(mut cap: usize) -> Result<Self, AllocError> {
+    pub fn try_with_capacity(mut cap: usize, allocator: A) -> Result<Self, AllocError>
+    where
+        A: Allocator,
+        R: RefCount,
+    {
         if cap == 0 {
-            unsafe {
-                if let Some(header) = H::global() {
-                    H::add_ref(header);
-                    return Ok(HeaderBuffer {
-                        header,
-                        _marker: PhantomData,
-                    })
-                }    
-            }
+            //unsafe {
+            //    if let Some(header) = H::global() {
+            //        H::add_ref(header);
+            //        return Ok(HeaderBuffer {
+            //            header,
+            //            _marker: PhantomData,
+            //        })
+            //    }
+            //}
 
             cap = 16;  
         }
@@ -218,12 +217,17 @@ impl<H: BufferHeader, T> HeaderBuffer<H, T> {
                 return Err(capacity_error());
             }
 
-            let layout = buffer_layout::<Header, T>(cap)?;
-            let alloc: NonNull<H> = NonNull::new(alloc::alloc(layout))
-                .ok_or(AllocError::Allocator { layout })?
-                .cast();
+            let layout = buffer_layout::<HeaderInternal<R, A>, T>(cap)?;
+            let allocation = allocator.alloc(layout)?;
+            // TODO: allocation could provide more capcity than what was requrested.
+            let alloc: NonNull<HeaderInternal<R, A>> = allocation.ptr.cast();
 
-            let header = H::with_capacity(cap as BufferSize);
+            let header = HeaderInternal {
+                vec: VecHeader { cap: cap as BufferSize, len: 0 },
+                ref_count: R::new(1),
+                allocator,
+            };
+
             ptr::write(
                 alloc.as_ptr(),
                 header,
@@ -236,9 +240,11 @@ impl<H: BufferHeader, T> HeaderBuffer<H, T> {
         }
     }
 
-    pub fn try_from_slice(data: &[T], cap: Option<usize>) -> Result<Self, AllocError>
+    pub fn try_from_slice(data: &[T], cap: Option<usize>, allocator: A) -> Result<Self, AllocError>
     where
         T: Clone,
+        R: RefCount,
+        A: Allocator,
     {
         let len = data.len();
         let cap = cap.map(|cap| cap.max(len)).unwrap_or(len);
@@ -247,7 +253,7 @@ impl<H: BufferHeader, T> HeaderBuffer<H, T> {
             return Err(capacity_error());
         }
 
-        let mut buffer = Self::try_with_capacity(cap)?;
+        let mut buffer = Self::try_with_capacity(cap, allocator)?;
 
         unsafe {
             buffer.header.as_mut().set_len(len as BufferSize);
@@ -288,6 +294,8 @@ impl<H: BufferHeader, T> HeaderBuffer<H, T> {
     pub fn try_clone_buffer(&self, new_cap: Option<BufferSize>) -> Result<Self, AllocError>
     where
         T: Clone,
+        R: RefCount,
+        A: Allocator,
     {
         unsafe {
             let header = self.header.as_ref();
@@ -297,12 +305,13 @@ impl<H: BufferHeader, T> HeaderBuffer<H, T> {
             } else {
                 header.capacity()
             };
+            let allocator = header.allocator.clone();
 
             if len > cap {
                 return Err(capacity_error());
             }
 
-            let mut clone = HeaderBuffer::try_with_capacity(cap as usize)?;
+            let mut clone = HeaderBuffer::try_with_capacity(cap as usize, allocator)?;
 
             if len > 0 {
                 let mut src = self.data_ptr();
@@ -324,6 +333,8 @@ impl<H: BufferHeader, T> HeaderBuffer<H, T> {
     pub fn try_copy_buffer(&self, new_cap: Option<BufferSize>) -> Result<Self, AllocError>
     where
         T: Copy,
+        R: RefCount,
+        A: Allocator,
     {
         unsafe {
             let header = self.header.as_ref();
@@ -338,7 +349,8 @@ impl<H: BufferHeader, T> HeaderBuffer<H, T> {
                 return Err(capacity_error());
             }
         
-            let mut clone = HeaderBuffer::try_with_capacity(cap as usize)?;
+            let allocator = header.allocator.clone();
+            let mut clone = HeaderBuffer::try_with_capacity(cap as usize, allocator)?;
         
             if len > 0 {
                 std::ptr::copy_nonoverlapping(self.data_ptr(), clone.data_ptr(), len as usize);
@@ -350,8 +362,8 @@ impl<H: BufferHeader, T> HeaderBuffer<H, T> {
     }
 
     #[inline]
-    pub fn is_unique(&self) -> bool {
-        unsafe { self.header.as_ref().ref_count() == 1 }
+    pub fn is_unique(&self) -> bool where R: RefCount {
+        HeaderInternal::is_unique(self.header)
     }
 
     #[inline]
@@ -365,9 +377,9 @@ impl<H: BufferHeader, T> HeaderBuffer<H, T> {
     }
 
     #[inline]
-    pub fn new_ref(&self) -> Self {
+    pub fn new_ref(&self) -> Self where R: RefCount {
         unsafe {
-            H::add_ref(self.header);
+            HeaderInternal::add_ref(self.header);
         }
         HeaderBuffer {
             header: self.header,
@@ -377,22 +389,23 @@ impl<H: BufferHeader, T> HeaderBuffer<H, T> {
 
     #[inline]
     pub fn data_ptr(&self) -> *mut T {
-        unsafe { (self.header.as_ptr() as *mut u8).add(header_size::<H, T>()) as *mut T }
+        unsafe { (self.header.as_ptr() as *mut u8).add(header_size::<HeaderInternal<R, A>, T>()) as *mut T }
+    }
+
+    #[inline]
+    pub fn clone_allocator(&self) -> A {
+        unsafe { self.header.as_ref().allocator.clone() }
     }
 
     #[inline]
     pub fn ptr_eq(&self, other: &Self) -> bool {
         self.header == other.header
     }
-
-    pub fn ref_count(&self) -> i32 {
-        unsafe { self.header.as_ref().ref_count() }
-    }
 }
 
 // SAFETY: All of the following methods require the buffer to be safely mutable. In other
 // words, there is a single reference to the buffer (is_unique() returned true).
-impl<H: BufferHeader, T> HeaderBuffer<H, T> {
+impl<T, R: RefCount, A: Allocator> HeaderBuffer<T, R, A> {
     #[inline]
     pub unsafe fn set_len(&mut self, new_len: BufferSize) {
         debug_assert!(self.is_unique());
@@ -448,6 +461,7 @@ impl<H: BufferHeader, T> HeaderBuffer<H, T> {
     pub unsafe fn try_push_slice(&mut self, data: &[T]) -> Result<(), AllocError>
     where
         T: Clone,
+        R: RefCount,
     {
         debug_assert!(self.is_unique());
         if data.len() > self.remaining_capacity() as usize {
@@ -512,7 +526,7 @@ impl<H: BufferHeader, T> HeaderBuffer<H, T> {
         debug_assert!(self.is_unique());
         unsafe {
             let len = self.header.as_ref().len();
-            drop_items(data_ptr::<H, T>(self.header), len);
+            drop_items(data_ptr::<HeaderInternal<R, A>, T>(self.header), len);
             self.header.as_mut().set_len(0);
         }
     }
@@ -542,18 +556,18 @@ pub unsafe fn header_from_data_ptr<H, T>(data_ptr: NonNull<T>) -> NonNull<H> {
     NonNull::new_unchecked((data_ptr.as_ptr() as *mut u8).sub(header_size::<H, T>()) as *mut H)
 }
 
-impl<H: BufferHeader, T> Drop for HeaderBuffer<H, T> {
+impl<T, R: RefCount, A: Allocator> Drop for HeaderBuffer<T, R, A> {
     fn drop(&mut self) {
         unsafe {
-            if H::release_ref(self.header) {
+            if HeaderInternal::release_ref(self.header) {
                 let cap = self.capacity();
                 // See the implementation of std Arc for the need to use this fence. Note that
                 // we only need it for the atomic reference counted version but I don't expect
                 // this to make a measurable difference.
                 std::sync::atomic::fence(Acquire);
                 let len = self.header.as_ref().len();
-                drop_items(data_ptr::<H, T>(self.header), len);
-                dealloc::<H, T>(self.header, cap);
+                drop_items(data_ptr::<HeaderInternal<R, A>, T>(self.header), len);
+                dealloc::<T, R, A>(self.header, cap);
             }
         }
     }
@@ -562,10 +576,10 @@ impl<H: BufferHeader, T> Drop for HeaderBuffer<H, T> {
 #[test]
 fn buffer_layout_alignemnt() {
     type B = Box<u32>;
-    let layout = buffer_layout::<Header, B>(2).unwrap();
+    let layout = buffer_layout::<HeaderInternal<DefaultRefCount, GlobalAllocator>, B>(2).unwrap();
     assert_eq!(layout.align(), mem::size_of::<B>());
 
-    let atomic_layout = buffer_layout::<AtomicHeader, B>(2).unwrap();
+    let atomic_layout = buffer_layout::<HeaderInternal<AtomicRefCount, GlobalAllocator>, B>(2).unwrap();
 
     assert_eq!(layout, atomic_layout);
 }
@@ -575,15 +589,16 @@ pub struct Allocation {
     pub size: usize,
 }
 
-pub trait Allocator {
-    unsafe fn alloc(layout: Layout) -> Result<Allocation, AllocError>;
-    unsafe fn dealloc(ptr: NonNull<u8>, layout: Layout);
+pub trait Allocator: Clone {
+    unsafe fn alloc(&self, layout: Layout) -> Result<Allocation, AllocError>;
+    unsafe fn dealloc(&self, ptr: NonNull<u8>, layout: Layout);
 }
 
+#[derive(Clone, Debug, PartialEq)]
 pub struct GlobalAllocator;
 
 impl Allocator for GlobalAllocator {
-    unsafe fn alloc(layout: Layout) -> Result<Allocation, AllocError> {
+    unsafe fn alloc(&self, layout: Layout) -> Result<Allocation, AllocError> {
         if let Some(ptr) = NonNull::new(std::alloc::alloc(layout)) {
             return Ok(Allocation {
                 ptr,
@@ -594,7 +609,7 @@ impl Allocator for GlobalAllocator {
         Err(AllocError::Allocator { layout })
     }
 
-    unsafe fn dealloc(ptr: NonNull<u8>, layout: Layout) {
+    unsafe fn dealloc(&self, ptr: NonNull<u8>, layout: Layout) {
         std::alloc::dealloc(ptr.as_ptr(), layout)
     }
 }

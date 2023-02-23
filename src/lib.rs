@@ -4,21 +4,9 @@ mod raw;
 mod shared;
 mod unique;
 
-use raw::AllocError;
-pub use raw::{BufferSize};
+pub use raw::{BufferSize, RefCount, AtomicRefCount, DefaultRefCount};
 pub use unique::UniqueVector;
 pub use shared::{SharedVector, AtomicSharedVector, RefCountedVector};
-
-
-pub trait ReferenceCount {
-    type Header: raw::BufferHeader;
-}
-
-pub struct DefaultRefCount;
-pub struct AtomicRefCount;
-
-impl ReferenceCount for DefaultRefCount { type Header = raw::Header; }
-impl ReferenceCount for AtomicRefCount { type Header = raw::AtomicHeader; }
 
 pub(crate) fn grow_amortized(len: usize, additional: usize) -> usize {
     let required = len.saturating_add(additional);

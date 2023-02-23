@@ -3,9 +3,9 @@ use std::ops::{Index, IndexMut, Deref, DerefMut};
 use std::ptr::NonNull;
 use std::fmt::Debug;
 
-use crate::raw::{self, AllocError, BufferSize, HeaderBuffer, VecHeader};
+use crate::raw::{self, AllocError, BufferSize, HeaderBuffer, VecHeader, RefCount, GlobalAllocator, AtomicRefCount, HeaderInternal, Allocator};
 use crate::shared::{AtomicSharedVector, SharedVector};
-use crate::grow_amortized;
+use crate::{grow_amortized, DefaultRefCount};
 
 /// A heap allocated, mutable contiguous buffer containing elements of type `T`.
 ///
@@ -25,42 +25,44 @@ use crate::grow_amortized;
 /// allocated buffer. Room for a 16 bytes header is left before the first element so that the
 /// vector can be converted into a `SharedVector` or `AtomicSharedVector` without reallocating
 /// the storage.
-pub struct UniqueVector<T> {
+pub struct UniqueVector<T, A: Allocator = GlobalAllocator> {
     pub(crate) data: NonNull<T>,
     pub(crate) len: BufferSize,
     pub(crate) cap: BufferSize,
+    pub(crate) allocator: A,
 }
 
-impl<T> UniqueVector<T> {
+impl<T> UniqueVector<T, GlobalAllocator> {
     /// Creates an empty vector.
     ///
     /// This does not allocate memory.
-    pub fn new() -> Self {
+    pub fn new() -> UniqueVector<T, GlobalAllocator> {
         UniqueVector {
             data: NonNull::dangling(),
             len: 0,
             cap: 0,
+            allocator: GlobalAllocator
         }
     }
 
     /// Creates an empty pre-allocated vector with a given storage capacity.
     ///
     /// Does not allocate memory if `cap` is zero.
-    pub fn with_capacity(cap: usize) -> Self {
+    pub fn with_capacity(cap: usize) -> UniqueVector<T, GlobalAllocator> {
         Self::try_with_capacity(cap).unwrap()
     }
 
     /// Creates an empty pre-allocated vector with a given storage capacity.
     ///
     /// Does not allocate memory if `cap` is zero.
-    pub fn try_with_capacity(cap: usize) -> Result<Self, AllocError> {
-        let inner: HeaderBuffer<raw::Header, T> = HeaderBuffer::try_with_capacity(cap)?;
+    pub fn try_with_capacity(cap: usize) -> Result<UniqueVector<T, GlobalAllocator>, AllocError> {
+        let inner: HeaderBuffer<T, DefaultRefCount, GlobalAllocator> = HeaderBuffer::try_with_capacity(cap, GlobalAllocator)?;
         let cap = inner.capacity();
         let data = NonNull::new(inner.data_ptr()).unwrap();
 
         mem::forget(inner);
 
-        Ok(UniqueVector { data, len: 0, cap })
+        Ok(UniqueVector { data, len: 0, cap, allocator: GlobalAllocator })
     }
 
     pub fn from_slice(data: &[T]) -> Self
@@ -74,7 +76,7 @@ impl<T> UniqueVector<T> {
     }
 
     /// Creates a vector with `n` copies of `elem`.
-    pub fn from_elem(elem: T, n: usize) -> Self
+    pub fn from_elem(elem: T, n: usize) -> UniqueVector<T, GlobalAllocator>
     where
         T: Clone,
     {
@@ -90,6 +92,26 @@ impl<T> UniqueVector<T> {
         v.push(elem);
 
         v
+    }
+
+    // TODO: make work with any allocator?
+    pub fn take(&mut self) -> Self {
+        mem::take(self)
+    }
+}
+
+impl<T, A: Allocator> UniqueVector<T, A> {
+    /// Creates an empty pre-allocated vector with a given storage capacity.
+    ///
+    /// Does not allocate memory if `cap` is zero.
+    pub fn try_with_allocator(cap: usize, allocator: A) -> Result<UniqueVector<T, A>, AllocError> {
+        let inner: HeaderBuffer<T, DefaultRefCount, A> = HeaderBuffer::try_with_capacity(cap, allocator.clone())?;
+        let cap = inner.capacity();
+        let data = NonNull::new(inner.data_ptr()).unwrap();
+
+        mem::forget(inner);
+
+        Ok(UniqueVector { data, len: 0, cap, allocator })
     }
 
     #[inline]
@@ -121,15 +143,21 @@ impl<T> UniqueVector<T> {
         self.data.as_ptr()
     }
 
-    unsafe fn write_header(&self) {
+    unsafe fn write_header<R>(&self) -> NonNull<HeaderInternal<R, A>>
+    where
+        R: RefCount,
+        A: Clone,
+    {
         debug_assert!(self.cap != 0);
         unsafe {
             let header = raw::header_from_data_ptr(self.data);
-            ptr::write(header.as_ptr(), raw::Header {
+            ptr::write(header.as_ptr(), raw::HeaderInternal {
                 vec: VecHeader { len: self.len, cap: self.cap },
-                ref_count: 1,
-                _pad: 0,
+                ref_count: R::new(1),
+                allocator: self.allocator.clone(),
             });
+
+            raw::header_from_data_ptr(self.data)
         }
     }
 
@@ -138,14 +166,13 @@ impl<T> UniqueVector<T> {
     /// This operation is cheap, the underlying storage does not not need
     /// to be reallocated.
     #[inline]
-    pub fn into_shared(self) -> SharedVector<T> {
+    pub fn into_shared(self) -> SharedVector<T, A> where A: Allocator {
         if self.cap == 0 {
-            return SharedVector::new();
+            return SharedVector::try_with_allocator(0, self.allocator.clone()).unwrap();
         }
         unsafe {
-            self.write_header();
-            let header = raw::header_from_data_ptr(self.data);
-            let inner: HeaderBuffer<raw::Header, T> = HeaderBuffer::from_raw(header);
+            let header = self.write_header::<DefaultRefCount>();
+            let inner: HeaderBuffer<T, DefaultRefCount, A> = HeaderBuffer::from_raw(header);
             mem::forget(self);
             SharedVector { inner }
         }
@@ -156,14 +183,13 @@ impl<T> UniqueVector<T> {
     /// This operation is cheap, the underlying storage does not not need
     /// to be reallocated.
     #[inline]
-    pub fn into_shared_atomic(self) -> AtomicSharedVector<T> {
+    pub fn into_shared_atomic(self) -> AtomicSharedVector<T, A> where A: Allocator {
         if self.cap == 0 {
-            return AtomicSharedVector::new();
+            return AtomicSharedVector::try_with_allocator(0, self.allocator.clone()).unwrap();
         }
         unsafe {
-            self.write_header();
-            let header = raw::header_from_data_ptr(self.data);
-            let inner: HeaderBuffer<raw::AtomicHeader, T> = HeaderBuffer::from_raw(header);
+            let header = self.write_header::<AtomicRefCount>();
+            let inner: HeaderBuffer<T, AtomicRefCount, A> = HeaderBuffer::from_raw(header);
             mem::forget(self);
             AtomicSharedVector { inner }
         }
@@ -335,7 +361,7 @@ impl<T> UniqueVector<T> {
     where
         T: Clone,
     {
-        let mut clone = Self::with_capacity(cap.max(self.len()));
+        let mut clone = Self::try_with_allocator(cap.max(self.len()), self.allocator.clone()).unwrap();
         let len = self.len;
 
         unsafe {
@@ -367,7 +393,7 @@ impl<T> UniqueVector<T> {
     // Note: Marking this #[inline(never)] is a pretty large regression in the push benchmark.
     #[cold]
     fn try_realloc_with_capacity(&mut self, new_cap: usize) -> Result<(), AllocError> {
-        let mut dst_buffer = Self::try_with_capacity(new_cap)?;
+        let mut dst_buffer = Self::try_with_allocator(new_cap, self.allocator.clone())?;
 
         if self.len > 0 {
             unsafe {
@@ -453,13 +479,9 @@ impl<T> UniqueVector<T> {
     pub fn shrink_to_fit(&mut self) where T: Clone {
         self.shrink_to(self.len())
     }
-
-    pub fn take(&mut self) -> Self {
-        mem::take(self)
-    }
 }
 
-impl<T> Drop for UniqueVector<T> {
+impl<T, A: Allocator> Drop for UniqueVector<T, A> {
     fn drop(&mut self) {
         if self.cap == 0 {
             return;
@@ -468,49 +490,49 @@ impl<T> Drop for UniqueVector<T> {
         self.clear();
 
         unsafe {
-            let ptr = raw::header_from_data_ptr::<raw::Header, T>(self.data);
-            raw::dealloc::<raw::Header, T>(ptr, self.cap);
+            let ptr = self.write_header::<DefaultRefCount>();
+            raw::dealloc::<T, DefaultRefCount, A>(ptr, self.cap);
         }
     }
 }
 
-impl<T: Clone> Clone for UniqueVector<T> {
+impl<T: Clone, A: Allocator> Clone for UniqueVector<T, A> {
     fn clone(&self) -> Self {
         self.clone_buffer()
     }
 }
 
-impl<T: PartialEq<T>> PartialEq<UniqueVector<T>> for UniqueVector<T> {
+impl<T: PartialEq<T>, A: Allocator> PartialEq<UniqueVector<T, A>> for UniqueVector<T, A> {
     fn eq(&self, other: &Self) -> bool {
         self.as_slice() == other.as_slice()
     }
 }
 
-impl<T: PartialEq<T>> PartialEq<&[T]> for UniqueVector<T> {
+impl<T: PartialEq<T>, A: Allocator> PartialEq<&[T]> for UniqueVector<T, A> {
     fn eq(&self, other: &&[T]) -> bool {
         self.as_slice() == *other
     }
 }
 
-impl<T> AsRef<[T]> for UniqueVector<T> {
+impl<T, A: Allocator> AsRef<[T]> for UniqueVector<T, A> {
     fn as_ref(&self) -> &[T] {
         self.as_slice()
     }
 }
 
-impl<T> AsMut<[T]> for UniqueVector<T> {
+impl<T, A: Allocator> AsMut<[T]> for UniqueVector<T, A> {
     fn as_mut(&mut self) -> &mut [T] {
         self.as_mut_slice()
     }
 }
 
-impl<T> Default for UniqueVector<T> {
+impl<T> Default for UniqueVector<T, GlobalAllocator> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<'a, T> IntoIterator for &'a UniqueVector<T> {
+impl<'a, T, A: Allocator> IntoIterator for &'a UniqueVector<T, A> {
     type Item = &'a T;
     type IntoIter = std::slice::Iter<'a, T>;
     fn into_iter(self) -> std::slice::Iter<'a, T> {
@@ -518,7 +540,7 @@ impl<'a, T> IntoIterator for &'a UniqueVector<T> {
     }
 }
 
-impl<'a, T> IntoIterator for &'a mut UniqueVector<T> {
+impl<'a, T, A: Allocator> IntoIterator for &'a mut UniqueVector<T, A> {
     type Item = &'a mut T;
     type IntoIter = std::slice::IterMut<'a, T>;
     fn into_iter(self) -> std::slice::IterMut<'a, T> {
@@ -526,7 +548,7 @@ impl<'a, T> IntoIterator for &'a mut UniqueVector<T> {
     }
 }
 
-impl<T, I> Index<I> for UniqueVector<T>
+impl<T, A: Allocator, I> Index<I> for UniqueVector<T, A>
 where
     I: std::slice::SliceIndex<[T]>,
 {
@@ -536,7 +558,7 @@ where
     }
 }
 
-impl<T, I> IndexMut<I> for UniqueVector<T>
+impl<T, A: Allocator, I> IndexMut<I> for UniqueVector<T, A>
 where
     I: std::slice::SliceIndex<[T]>,
 {
@@ -545,20 +567,20 @@ where
     }
 }
 
-impl<T> Deref for UniqueVector<T> {
+impl<T, A: Allocator> Deref for UniqueVector<T, A> {
     type Target = [T];
     fn deref(&self) -> &[T] {
         self.as_slice()
     }
 }
 
-impl<T> DerefMut for UniqueVector<T> {
+impl<T, A: Allocator> DerefMut for UniqueVector<T, A> {
     fn deref_mut(&mut self) -> &mut [T] {
         self.as_mut_slice()
     }
 }
 
-impl<T: Debug> Debug for UniqueVector<T> {
+impl<T: Debug, A: Allocator> Debug for UniqueVector<T, A> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         self.as_slice().fmt(f)
     }
@@ -568,4 +590,102 @@ impl<T: Debug> Debug for UniqueVector<T> {
 fn ensure_unique_empty() {
     let mut v: SharedVector<u32> = SharedVector::new();
     v.ensure_unique();
+}
+
+#[test]
+fn bump_alloc() {
+    use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+    use std::alloc::Layout;
+    use crate::raw::Allocation;
+
+    pub struct BumpAllocator {
+        buf: *mut u8,
+        size: usize,
+        head: AtomicUsize,
+        live_allocations: AtomicI32,
+    }
+
+    impl BumpAllocator {
+        fn new(size: usize) -> Self {
+            unsafe {
+                let layout = Layout::from_size_align(size, 64).unwrap();
+                let buf = std::alloc::alloc(layout);
+    
+                BumpAllocator { buf, size, head: AtomicUsize::new(0), live_allocations: AtomicI32::new(0) }
+            }
+        }
+    }
+
+    impl<'l> raw::Allocator for &'l BumpAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> Result<Allocation, AllocError> {
+            let mut offset = 0;
+            loop {
+                offset = self.head.load(Ordering::SeqCst);
+                let mut size = layout.size();
+                let rem = offset % layout.align();
+                if rem != 0 {
+                    size += layout.align() - rem;
+                }
+                if offset + size > self.size {
+                    return Err(AllocError::Allocator { layout });
+                }    
+                if self.head.compare_exchange(offset, offset + size, Ordering::SeqCst, Ordering::Relaxed).is_ok() {
+                    break;
+                }
+            }
+
+            let ptr = NonNull::new_unchecked(self.buf.add(offset));
+            self.live_allocations.fetch_add(1, Ordering::SeqCst);
+
+            Ok(Allocation { ptr, size: layout.size() })
+        }
+
+        unsafe fn dealloc(&self, _ptr: NonNull<u8>, _layout: Layout) {
+            self.live_allocations.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    impl Drop for BumpAllocator {
+        fn drop(&mut self) {
+            unsafe {
+                std::alloc::dealloc(self.buf, Layout::from_size_align(self.size, 64).unwrap());
+            }
+        }
+    }
+
+
+    let allocator = BumpAllocator::new(4096 * 8);
+
+    {
+        let mut v1: UniqueVector<u32, &BumpAllocator> = UniqueVector::try_with_allocator(4, &allocator).unwrap();
+        v1.push(0);
+        v1.push(1);
+        v1.push(2);
+        assert_eq!(v1.capacity(), 4);
+        assert_eq!(v1.as_slice(), &[0, 1, 2]);
+     
+        let mut v2: UniqueVector<u32, &BumpAllocator> = UniqueVector::try_with_allocator(4, &allocator).unwrap();
+        assert_eq!(v2.capacity(), 4);
+    
+        v2.push(10);
+        v2.push(11);
+    
+        assert_eq!(v2.as_slice(), &[10, 11]);
+    
+        v1.push(3);
+        v1.push(4);
+    
+        assert_eq!(v1.as_slice(), &[0, 1, 2, 3, 4]);
+    
+        assert!(v1.capacity() > 4);
+    
+        v2.push(12);
+        v2.push(13);
+        v2.push(14);
+    
+        assert_eq!(v1.as_slice(), &[0, 1, 2, 3, 4]);
+        assert_eq!(v2.as_slice(), &[10, 11, 12, 13, 14]);
+    }
+
+    assert_eq!(allocator.live_allocations.load(Ordering::SeqCst), 0);
 }
