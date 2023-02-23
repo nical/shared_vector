@@ -23,6 +23,12 @@ pub struct VecHeader {
     pub len: BufferSize,
 }
 
+pub struct HeaderInternal<R, A> {
+    vec: VecHeader,
+    ref_count: R,
+    allocator: A,
+}
+
 // SAFETY: UniqueVector relies on AtomicHeader and Header having the same representation.
 #[repr(C)]
 pub struct AtomicHeader {
@@ -139,7 +145,11 @@ pub unsafe fn data_ptr<Header, T>(header: NonNull<Header>) -> *mut T {
 const fn header_size<Header, T>() -> usize {
     let a = mem::align_of::<T>();
     let s = mem::size_of::<Header>();
-    if a > s { a } else { s }
+    let size = if a > s { a } else { s };
+
+    // Favor L1 cache line alignment for large structs.
+    let min = if mem::size_of::<T>() < 64 { 16 } else { 64 };
+    if size < min { min } else { size }
 }
 
 pub fn buffer_layout<Header, T>(n: usize) -> Result<Layout, AllocError> {
@@ -147,6 +157,7 @@ pub fn buffer_layout<Header, T>(n: usize) -> Result<Layout, AllocError> {
         .checked_mul(n)
         .ok_or(AllocError::CapacityOverflow)?;
     let align = mem::align_of::<Header>().max(mem::align_of::<T>());
+    let align = if mem::size_of::<T>() < 64 { align } else { align.max(64) };
     let header_size = header_size::<Header, T>();
 
     Layout::from_size_align(header_size + size, align).map_err(|_| AllocError::CapacityOverflow)
@@ -353,29 +364,6 @@ impl<H: BufferHeader, T> HeaderBuffer<H, T> {
         unsafe { std::slice::from_raw_parts_mut(self.data_ptr(), self.header.as_ref().len() as usize) }
     }
 
-
-    #[inline]
-    pub unsafe fn first(&self) -> Option<*mut T> {
-        let len = self.len();
-        if len == 0 {
-            return None;
-        }
-
-        Some(self.data_ptr())    
-    }
-
-    #[inline]
-    pub unsafe fn last(&self) -> Option<*mut T> {
-        let len = self.len() as usize;
-        if len == 0 {
-            return None;
-        }
-
-        unsafe{
-            Some(self.data_ptr().add(len - 1))    
-        }
-    }
-
     #[inline]
     pub fn new_ref(&self) -> Self {
         unsafe {
@@ -580,4 +568,33 @@ fn buffer_layout_alignemnt() {
     let atomic_layout = buffer_layout::<AtomicHeader, B>(2).unwrap();
 
     assert_eq!(layout, atomic_layout);
+}
+
+pub struct Allocation {
+    pub ptr: NonNull<u8>,
+    pub size: usize,
+}
+
+pub trait Allocator {
+    unsafe fn alloc(layout: Layout) -> Result<Allocation, AllocError>;
+    unsafe fn dealloc(ptr: NonNull<u8>, layout: Layout);
+}
+
+pub struct GlobalAllocator;
+
+impl Allocator for GlobalAllocator {
+    unsafe fn alloc(layout: Layout) -> Result<Allocation, AllocError> {
+        if let Some(ptr) = NonNull::new(std::alloc::alloc(layout)) {
+            return Ok(Allocation {
+                ptr,
+                size: layout.size(),
+            });
+        }
+
+        Err(AllocError::Allocator { layout })
+    }
+
+    unsafe fn dealloc(ptr: NonNull<u8>, layout: Layout) {
+        std::alloc::dealloc(ptr.as_ptr(), layout)
+    }
 }
