@@ -11,13 +11,14 @@ pub enum Cmd {
     DropVec { idx: usize },
     Clear { idx: usize },
     Push { idx: usize, val: u32 },
+    PushWithinCapacity { idx: usize, val: u32 },
     PushSlice { idx: usize },
     Pop { idx: usize },
     CloneBuffer { src_idx: usize, dst_idx: usize },
     Iter { idx: usize },
     IterMut { idx: usize },
     EnsureUnique { idx: usize },
-    PushVector { src_idx: usize, dst_idx: usize },
+    Append { src_idx: usize, dst_idx: usize },
     WithCapacity { idx: usize, cap: usize },
     FromSlice { src_idx: usize, dst_idx: usize },
     AsMutSlice { idx: usize },
@@ -27,6 +28,10 @@ pub enum Cmd {
     LastMut { idx: usize, },
     Reserve { idx: usize, val: usize },
     Convert { idx: usize },
+    Swap { idx: usize, offsets: (usize, usize) },
+    SwapRemove { idx: usize, offset: usize },
+    ShrinkTo { idx: usize, cap: usize },
+    ShrinkToFit { idx: usize },
 }
 
 fn cmd_to_string(vec_type: &str, cmd: Cmd) -> String {
@@ -47,6 +52,9 @@ fn cmd_to_string(vec_type: &str, cmd: Cmd) -> String {
         }
         Cmd::Push { idx, val } => {
             format!("vectors[{}].push(Box::new({val}));", slot(idx))
+        }
+        Cmd::PushWithinCapacity { idx, val } => {
+            format!("vectors[{}].push_within_capacity(Box::new({val}));", slot(idx))
         }
         Cmd::PushSlice { idx } => {
             format!("vectors[{}].push_slice(&[Box::new(1), Box::new(2), Box::new(3)]);", slot(idx)) 
@@ -71,9 +79,9 @@ fn cmd_to_string(vec_type: &str, cmd: Cmd) -> String {
             }
             format!("vectors[{}].ensure_unique();", slot(idx))
         }
-        Cmd::PushVector { src_idx, dst_idx } => {
-            let a = format!("let v = take(&mut vectors[{}]);", slot(src_idx));
-            let b = format!("vectors[{}].push_vector(v);", slot(dst_idx));
+        Cmd::Append { src_idx, dst_idx } => {
+            let a = format!("let mut v = take(&mut vectors[{}]);", slot(src_idx));
+            let b = format!("vectors[{}].append(&mut v);", slot(dst_idx));
             format!("{a}\n    {b}")
         }
         Cmd::WithCapacity { idx, cap } => {
@@ -119,6 +127,23 @@ fn cmd_to_string(vec_type: &str, cmd: Cmd) -> String {
             let a = format!("let a = take(&mut vectors[{idx}]);");
             let b = format!("vectors[{idx}] = a.{conv}().{inv}();");
             format!("{a}\n    {b}")
+        }
+        Cmd::Swap { idx, offsets } => {
+            let a = format!("let vec = &mut vectors[{}];", slot(idx));
+            let b = format!("let len = vec.len();");
+            let c = format!("if !vec.is_empty() {{ vec.swap({} % len, {} % len) }}", offsets.0, offsets.1);
+            format!("{a}\n    {b}\n    {c}")
+        }
+        Cmd::SwapRemove { idx, offset } => {
+            let a = format!("let vec = &mut vectors[{}];", slot(idx));
+            let b = format!("if !vec.is_empty() {{ vec.swap_remove({offset} % vec.len()); }}");
+            format!("{a}\n    {b}")
+        }
+        Cmd::ShrinkTo { idx, cap } => {
+            format!("vectors[{}].shrink_to({cap});", slot(idx))
+        }
+        Cmd::ShrinkToFit { idx } => {
+            format!("vectors[{}].shrink_to_fit();", slot(idx))
         }
     }
 }
