@@ -665,7 +665,8 @@ fn bump_alloc() {
         assert_eq!(v1.capacity(), 4);
         assert_eq!(v1.as_slice(), &[0, 1, 2]);
      
-        let mut v2 = crate::vector![using &allocator => 10, 11];
+        // let mut v2 = crate::vector!(@ &allocator [10, 11]);
+        let mut v2 = crate::vector!(using &allocator => [10, 11]);
         assert_eq!(v2.capacity(), 2);
     
         assert_eq!(v2.as_slice(), &[10, 11]);

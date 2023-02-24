@@ -37,10 +37,15 @@ macro_rules! vector {
         $(vec.push($x);)*
         vec
     });
-    (using $allocator:expr => $($x:expr),*$(,)*) => ({
+    (using $allocator:expr => [$($x:expr),*$(,)*]) => ({
         let count = 0usize $(+ $crate::vector!(@one@ $x))*;
         let mut vec = $crate::UniqueVector::try_with_allocator(count, $allocator).unwrap();
         $(vec.push($x);)*
+        vec
+    });
+    (using $allocator:expr => [$x:expr;$n:expr]) => ({
+        let mut vec = $crate::UniqueVector::try_with_allocator($n, $allocator).unwrap();
+        for _ in 0..$n { vec.push($x.clone()); }
         vec
     });
 }
@@ -48,7 +53,9 @@ macro_rules! vector {
 #[macro_export]
 macro_rules! rc_vector {
     ($elem:expr; $n:expr) => ({
-        $crate::SharedVector::from_elem($elem, $n)
+        let mut vec = $crate::SharedVector::with_capacity($n);
+        for _ in 0..$n { vec.push($elem.clone()); }
+        vec
     });
     ($($x:expr),*$(,)*) => ({
         let count = 0usize $(+ $crate::vector!(@one@ $x))*;
@@ -56,10 +63,15 @@ macro_rules! rc_vector {
         $(vec.push($x);)*
         vec
     });
-    (using $allocator:expr => $($x:expr),*$(,)*) => ({
+    (using $allocator:expr => [$($x:expr),*$(,)*]) => ({
         let count = 0usize $(+ $crate::vector!(@one@ $x))*;
         let mut vec = $crate::SharedVector::try_with_allocator(count, $allocator).unwrap();
         $(vec.push($x);)*
+        vec
+    });
+    (using $allocator:expr => [$elem:expr;$n:expr]) => ({
+        let mut vec = $crate::SharedVector::try_with_allocator($n, $allocator).unwrap();
+        for _ in 0..$n { vec.push($elem.clone()); }
         vec
     });
 }
@@ -67,7 +79,9 @@ macro_rules! rc_vector {
 #[macro_export]
 macro_rules! arc_vector {
     ($elem:expr; $n:expr) => ({
-        $crate::AtomicSharedVector::from_elem($elem, $n)
+        let mut vec = $crate::AtomicSharedVector::with_capacity($n);
+        for _ in 0..$n { vec.push($elem.clone()); }
+        vec
     });
     ($($x:expr),*$(,)*) => ({
         let count = 0usize $(+ $crate::vector!(@one@ $x))*;
@@ -75,35 +89,42 @@ macro_rules! arc_vector {
         $(vec.push($x);)*
         vec
     });
-    (using $allocator:expr => $($x:expr),*$(,)*) => ({
+    (using $allocator:expr => [$($x:expr),*$(,)*]) => ({
         let count = 0usize $(+ $crate::vector!(@one@ $x))*;
         let mut vec = $crate::AtomicSharedVector::try_with_allocator(count, $allocator).unwrap();
         $(vec.push($x);)*
+        vec
+    });
+    (using $allocator:expr => [$elem:expr;$n:expr]) => ({
+        let mut vec = $crate::AtomicSharedVector::try_with_allocator($n, $allocator).unwrap();
+        for _ in 0..$n { vec.push($elem.clone()); }
         vec
     });
 }
 
 #[test]
 fn vector_macro() {
+    use crate::raw::GlobalAllocator;
+
     let v1: UniqueVector<u32> = vector![0, 1, 2, 3, 4, 5];
-    let v2: UniqueVector<u32> = vector![42, 10];
-    let vec1: Vec<u32> = v1.iter().cloned().collect();
-    let vec2: Vec<u32> = v2.iter().cloned().collect();
-    assert_eq!(vec1, vec![0, 1, 2, 3, 4, 5]);
-    assert_eq!(vec2, vec![42, 10]);
+    let v2: UniqueVector<u32> = vector![2; 4];
+    let v3: UniqueVector<u32> = vector!(using GlobalAllocator => [6, 7]);
+    assert_eq!(v1.as_slice(), &[0, 1, 2, 3, 4, 5]);
+    assert_eq!(v2.as_slice(), &[2, 2, 2, 2]);
+    assert_eq!(v3.as_slice(), &[6, 7]);
 
 
     let v1: SharedVector<u32> = rc_vector![0, 1, 2, 3, 4, 5];
-    let v2: SharedVector<u32> = rc_vector![42, 10];
-    let vec1: Vec<u32> = v1.iter().cloned().collect();
-    let vec2: Vec<u32> = v2.iter().cloned().collect();
-    assert_eq!(vec1, vec![0, 1, 2, 3, 4, 5]);
-    assert_eq!(vec2, vec![42, 10]);
+    let v2: SharedVector<u32> = rc_vector![3; 5];
+    let v3: SharedVector<u32> = rc_vector!(using GlobalAllocator => [4; 3]);
+    assert_eq!(v1.as_slice(), &[0, 1, 2, 3, 4, 5]);
+    assert_eq!(v2.as_slice(), &[3, 3, 3, 3, 3]);
+    assert_eq!(v3.as_slice(), &[4, 4, 4]);
 
     let v1: AtomicSharedVector<u32> = arc_vector![0, 1, 2, 3, 4, 5];
-    let v2: AtomicSharedVector<u32> = arc_vector![42, 10];
-    let vec1: Vec<u32> = v1.iter().cloned().collect();
-    let vec2: Vec<u32> = v2.iter().cloned().collect();
-    assert_eq!(vec1, vec![0, 1, 2, 3, 4, 5]);
-    assert_eq!(vec2, vec![42, 10]);
+    let v2: AtomicSharedVector<u32> = arc_vector![1; 4];
+    let v3: AtomicSharedVector<u32> = arc_vector![using GlobalAllocator => [3, 2, 1]];
+    assert_eq!(v1.as_slice(), &[0, 1, 2, 3, 4, 5]);
+    assert_eq!(v2.as_slice(), &[1, 1, 1, 1]);
+    assert_eq!(v3.as_slice(), &[3, 2, 1]);
 }
