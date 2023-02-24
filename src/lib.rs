@@ -3,10 +3,12 @@
 mod raw;
 mod shared;
 mod unique;
+mod alloc;
 
 pub use raw::{BufferSize, RefCount, AtomicRefCount, DefaultRefCount};
 pub use unique::UniqueVector;
 pub use shared::{SharedVector, AtomicSharedVector, RefCountedVector};
+pub use alloc::*;
 
 pub(crate) fn grow_amortized(len: usize, additional: usize) -> usize {
     let required = len.saturating_add(additional);
@@ -104,7 +106,7 @@ macro_rules! arc_vector {
 
 #[test]
 fn vector_macro() {
-    use crate::raw::GlobalAllocator;
+    use crate::alloc::GlobalAllocator;
 
     let v1: UniqueVector<u32> = vector![0, 1, 2, 3, 4, 5];
     let v2: UniqueVector<u32> = vector![2; 4];
