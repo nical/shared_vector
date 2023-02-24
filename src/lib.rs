@@ -27,13 +27,19 @@ pub(crate) fn grow_amortized(len: usize, additional: usize) -> usize {
 
 #[macro_export]
 macro_rules! vector {
-    (@one $x:expr) => (1usize);
+    (@one@ $x:expr) => (1usize);
     ($elem:expr; $n:expr) => ({
         $crate::UniqueVector::from_elem($elem, $n)
     });
     ($($x:expr),*$(,)*) => ({
-        let count = 0usize $(+ $crate::vector!(@one $x))*;
+        let count = 0usize $(+ $crate::vector!(@one@ $x))*;
         let mut vec = $crate::UniqueVector::with_capacity(count);
+        $(vec.push($x);)*
+        vec
+    });
+    (using $allocator:expr => $($x:expr),*$(,)*) => ({
+        let count = 0usize $(+ $crate::vector!(@one@ $x))*;
+        let mut vec = $crate::UniqueVector::try_with_allocator(count, $allocator).unwrap();
         $(vec.push($x);)*
         vec
     });
@@ -45,8 +51,14 @@ macro_rules! rc_vector {
         $crate::SharedVector::from_elem($elem, $n)
     });
     ($($x:expr),*$(,)*) => ({
-        let count = 0usize $(+ $crate::vector!(@one $x))*;
+        let count = 0usize $(+ $crate::vector!(@one@ $x))*;
         let mut vec = $crate::SharedVector::with_capacity(count);
+        $(vec.push($x);)*
+        vec
+    });
+    (using $allocator:expr => $($x:expr),*$(,)*) => ({
+        let count = 0usize $(+ $crate::vector!(@one@ $x))*;
+        let mut vec = $crate::SharedVector::try_with_allocator(count, $allocator).unwrap();
         $(vec.push($x);)*
         vec
     });
@@ -58,8 +70,14 @@ macro_rules! arc_vector {
         $crate::AtomicSharedVector::from_elem($elem, $n)
     });
     ($($x:expr),*$(,)*) => ({
-        let count = 0usize $(+ $crate::vector!(@one $x))*;
+        let count = 0usize $(+ $crate::vector!(@one@ $x))*;
         let mut vec = $crate::AtomicSharedVector::with_capacity(count);
+        $(vec.push($x);)*
+        vec
+    });
+    (using $allocator:expr => $($x:expr),*$(,)*) => ({
+        let count = 0usize $(+ $crate::vector!(@one@ $x))*;
+        let mut vec = $crate::AtomicSharedVector::try_with_allocator(count, $allocator).unwrap();
         $(vec.push($x);)*
         vec
     });

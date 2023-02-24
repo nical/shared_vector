@@ -3,7 +3,7 @@ use std::ops::{Index, IndexMut, Deref, DerefMut};
 use std::ptr::NonNull;
 use std::fmt::Debug;
 
-use crate::raw::{self, AllocError, BufferSize, HeaderBuffer, VecHeader, RefCount, GlobalAllocator, AtomicRefCount, HeaderInternal, Allocator};
+use crate::raw::{self, AllocError, BufferSize, HeaderBuffer, VecHeader, RefCount, GlobalAllocator, AtomicRefCount, Header, Allocator};
 use crate::shared::{AtomicSharedVector, SharedVector};
 use crate::{grow_amortized, DefaultRefCount};
 
@@ -143,19 +143,20 @@ impl<T, A: Allocator> UniqueVector<T, A> {
         self.data.as_ptr()
     }
 
-    unsafe fn write_header<R>(&self) -> NonNull<HeaderInternal<R, A>>
+    unsafe fn write_header<R>(&self) -> NonNull<Header<R, A>>
     where
         R: RefCount,
         A: Clone,
     {
         debug_assert!(self.cap != 0);
         unsafe {
-            let header = raw::header_from_data_ptr(self.data);
-            ptr::write(header.as_ptr(), raw::HeaderInternal {
+            let mut header = raw::header_from_data_ptr(self.data);
+
+            *header.as_mut() = raw::Header {
                 vec: VecHeader { len: self.len, cap: self.cap },
                 ref_count: R::new(1),
                 allocator: self.allocator.clone(),
-            });
+            };
 
             raw::header_from_data_ptr(self.data)
         }
@@ -618,7 +619,7 @@ fn bump_alloc() {
 
     impl<'l> raw::Allocator for &'l BumpAllocator {
         unsafe fn alloc(&self, layout: Layout) -> Result<Allocation, AllocError> {
-            let mut offset = 0;
+            let mut offset;
             loop {
                 offset = self.head.load(Ordering::SeqCst);
                 let mut size = layout.size();
@@ -664,11 +665,8 @@ fn bump_alloc() {
         assert_eq!(v1.capacity(), 4);
         assert_eq!(v1.as_slice(), &[0, 1, 2]);
      
-        let mut v2: UniqueVector<u32, &BumpAllocator> = UniqueVector::try_with_allocator(4, &allocator).unwrap();
-        assert_eq!(v2.capacity(), 4);
-    
-        v2.push(10);
-        v2.push(11);
+        let mut v2 = crate::vector![using &allocator => 10, 11];
+        assert_eq!(v2.capacity(), 2);
     
         assert_eq!(v2.as_slice(), &[10, 11]);
     
@@ -682,6 +680,8 @@ fn bump_alloc() {
         v2.push(12);
         v2.push(13);
         v2.push(14);
+
+        let v2 = v2.into_shared();
     
         assert_eq!(v1.as_slice(), &[0, 1, 2, 3, 4]);
         assert_eq!(v2.as_slice(), &[10, 11, 12, 13, 14]);
