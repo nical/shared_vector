@@ -5,6 +5,8 @@ use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicI32, Ordering::{Acquire, Release, Relaxed}};
 use std::cell::UnsafeCell;
 
+use crate::alloc::*;
+
 pub type BufferSize = u32;
 
 pub trait RefCount {
@@ -76,18 +78,6 @@ impl RefCount for DefaultRefCount {
     fn get(&self) -> i32 {
         unsafe { *self.0.get() }
     }
-}
-
-/// Error type for APIs with fallible heap allocation
-#[derive(Debug)]
-pub enum AllocError {
-    /// Overflow `usize::MAX` or other error during size computation
-    CapacityOverflow,
-    /// The allocator return an error
-    Allocator {
-        /// The layout that was passed to the allocator
-        layout: Layout,
-    },
 }
 
 #[inline]
@@ -528,34 +518,3 @@ fn buffer_layout_alignemnt() {
     assert_eq!(layout, atomic_layout);
 }
 
-pub struct Allocation {
-    pub ptr: NonNull<u8>,
-    pub size: usize,
-}
-
-// A dumbed down version of the standard allocator trait
-// TODO: Let's make it use the same trait instead.
-pub trait Allocator: Clone {
-    unsafe fn alloc(&self, layout: Layout) -> Result<Allocation, AllocError>;
-    unsafe fn dealloc(&self, ptr: NonNull<u8>, layout: Layout);
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct GlobalAllocator;
-
-impl Allocator for GlobalAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> Result<Allocation, AllocError> {
-        if let Some(ptr) = NonNull::new(std::alloc::alloc(layout)) {
-            return Ok(Allocation {
-                ptr,
-                size: layout.size(),
-            });
-        }
-
-        Err(AllocError::Allocator { layout })
-    }
-
-    unsafe fn dealloc(&self, ptr: NonNull<u8>, layout: Layout) {
-        std::alloc::dealloc(ptr.as_ptr(), layout)
-    }
-}

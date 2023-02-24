@@ -4,7 +4,8 @@ use std::ptr::NonNull;
 use std::fmt::Debug;
 
 use crate::unique::UniqueVector;
-use crate::raw::{AllocError, BufferSize, HeaderBuffer, GlobalAllocator, Allocator};
+use crate::raw::{BufferSize, HeaderBuffer};
+use crate::alloc::{AllocError, GlobalAllocator, Allocator};
 use crate::{RefCount, AtomicRefCount, DefaultRefCount, grow_amortized};
 
 /// A heap allocated, atomically reference counted, immutable contiguous buffer containing elements of type `T`.
@@ -585,49 +586,6 @@ fn num(val: u32) -> Box<u32> {
 }
 
 #[test]
-fn basic_unique() {
-    let mut a = UniqueVector::with_capacity(256);
-
-    a.push(num(0));
-    a.push(num(1));
-    a.push(num(2));
-
-    let a = a.into_shared();
-
-    assert_eq!(a.len(), 3);
-
-    assert_eq!(a.as_slice(), &[num(0), num(1), num(2)]);
-
-    assert!(a.is_unique());
-
-    let b = UniqueVector::from_slice(&[num(0), num(1), num(2), num(3), num(4)]);
-
-    assert_eq!(b.as_slice(), &[num(0), num(1), num(2), num(3), num(4)]);
-
-    let c = a.clone_buffer();
-    assert!(!c.ptr_eq(&a));
-
-    let a2 = a.new_ref();
-    assert!(a2.ptr_eq(&a));
-    assert!(!a.is_unique());
-    assert!(!a2.is_unique());
-
-    mem::drop(a2);
-
-    assert!(a.is_unique());
-
-    let _ = c.clone_buffer();
-    let _ = b.clone_buffer();
-
-    let mut d = UniqueVector::with_capacity(64);
-    d.push_slice(&[num(0), num(1), num(2)]);
-    d.push_slice(&[]);
-    d.push_slice(&[num(3), num(4)]);
-
-    assert_eq!(d.as_slice(), &[num(0), num(1), num(2), num(3), num(4)]);
-}
-
-#[test]
 fn basic_shared() {
     basic_shared_impl::<DefaultRefCount>();
     basic_shared_impl::<AtomicRefCount>();
@@ -702,4 +660,10 @@ fn grow() {
     b.push(num(3));
 
     assert_eq!(b.as_slice(), &[num(1), num(2), num(3)]);
+}
+
+#[test]
+fn ensure_unique_empty() {
+    let mut v: SharedVector<u32> = SharedVector::new();
+    v.ensure_unique();
 }

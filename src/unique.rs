@@ -3,7 +3,8 @@ use std::ops::{Index, IndexMut, Deref, DerefMut};
 use std::ptr::NonNull;
 use std::fmt::Debug;
 
-use crate::raw::{self, AllocError, BufferSize, HeaderBuffer, VecHeader, RefCount, GlobalAllocator, AtomicRefCount, Header, Allocator};
+use crate::alloc::{AllocError, GlobalAllocator, Allocator};
+use crate::raw::{self, BufferSize, HeaderBuffer, VecHeader, RefCount, AtomicRefCount, Header, buffer_layout};
 use crate::shared::{AtomicSharedVector, SharedVector};
 use crate::{grow_amortized, DefaultRefCount};
 
@@ -391,29 +392,30 @@ impl<T, A: Allocator> UniqueVector<T, A> {
         self.try_realloc_with_capacity(new_cap)
     }
 
-    // Note: Marking this #[inline(never)] is a pretty large regression in the push benchmark.
     #[cold]
     fn try_realloc_with_capacity(&mut self, new_cap: usize) -> Result<(), AllocError> {
-        let mut dst_buffer = Self::try_with_allocator(new_cap, self.allocator.clone())?;
+        if self.cap == 0 {
+            let dst_buffer = Self::try_with_allocator(new_cap, self.allocator.clone())?;
+            *self = dst_buffer;
 
-        if self.len > 0 {
-            unsafe {
-                let src = self.data_ptr();
-                let dst = dst_buffer.data_ptr();
-                let len = self.len;
-    
-                self.len = 0;
-                dst_buffer.len = len;
-    
-                ptr::copy_nonoverlapping(src, dst, len as usize);
-            }    
+            return Ok(())
         }
 
-        *self = dst_buffer;
+        unsafe {
+            type R = DefaultRefCount;
+            let old_cap = self.capacity();
+            let old_ptr = self.write_header::<DefaultRefCount>().cast();
+            let old_layout = buffer_layout::<Header<R, A>, T>(old_cap).unwrap();
+            let new_layout = buffer_layout::<Header<R, A>, T>(new_cap).unwrap();
+            let new_alloc = self.allocator.realloc(old_ptr, old_layout, new_layout.size())?;
+            let new_data_ptr = crate::raw::data_ptr::<Header<R, A>, T>(new_alloc.ptr.cast());
+
+            self.data = NonNull::new_unchecked(new_data_ptr);
+            self.cap = new_cap as u32;
+        }
 
         Ok(())
     }
-
 
     #[inline]
     pub fn reserve(&mut self, additional: usize) {
@@ -588,16 +590,9 @@ impl<T: Debug, A: Allocator> Debug for UniqueVector<T, A> {
 }
 
 #[test]
-fn ensure_unique_empty() {
-    let mut v: SharedVector<u32> = SharedVector::new();
-    v.ensure_unique();
-}
-
-#[test]
 fn bump_alloc() {
     use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
-    use std::alloc::Layout;
-    use crate::raw::Allocation;
+    use crate::alloc::{Allocation, Layout};
 
     pub struct BumpAllocator {
         buf: *mut u8,
@@ -617,7 +612,7 @@ fn bump_alloc() {
         }
     }
 
-    impl<'l> raw::Allocator for &'l BumpAllocator {
+    impl<'l> Allocator for &'l BumpAllocator {
         unsafe fn alloc(&self, layout: Layout) -> Result<Allocation, AllocError> {
             let mut offset;
             loop {
@@ -690,3 +685,51 @@ fn bump_alloc() {
 
     assert_eq!(allocator.live_allocations.load(Ordering::SeqCst), 0);
 }
+
+#[test]
+fn basic_unique() {
+    fn num(val: u32) -> Box<u32> {
+        Box::new(val)
+    }
+
+    let mut a = UniqueVector::with_capacity(256);
+
+    a.push(num(0));
+    a.push(num(1));
+    a.push(num(2));
+
+    let a = a.into_shared();
+
+    assert_eq!(a.len(), 3);
+
+    assert_eq!(a.as_slice(), &[num(0), num(1), num(2)]);
+
+    assert!(a.is_unique());
+
+    let b = UniqueVector::from_slice(&[num(0), num(1), num(2), num(3), num(4)]);
+
+    assert_eq!(b.as_slice(), &[num(0), num(1), num(2), num(3), num(4)]);
+
+    let c = a.clone_buffer();
+    assert!(!c.ptr_eq(&a));
+
+    let a2 = a.new_ref();
+    assert!(a2.ptr_eq(&a));
+    assert!(!a.is_unique());
+    assert!(!a2.is_unique());
+
+    mem::drop(a2);
+
+    assert!(a.is_unique());
+
+    let _ = c.clone_buffer();
+    let _ = b.clone_buffer();
+
+    let mut d = UniqueVector::with_capacity(64);
+    d.push_slice(&[num(0), num(1), num(2)]);
+    d.push_slice(&[]);
+    d.push_slice(&[num(3), num(4)]);
+
+    assert_eq!(d.as_slice(), &[num(0), num(1), num(2), num(3), num(4)]);
+}
+
