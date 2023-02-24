@@ -490,7 +490,7 @@ impl<T, R: RefCount, A: Allocator> RefCountedVector<T, R, A> {
     }
 }
 
-unsafe impl<T: Sync, A: Allocator> Send for AtomicSharedVector<T, A> {}
+unsafe impl<T: Sync, A: Allocator + Send> Send for AtomicSharedVector<T, A> {}
 
 impl<T, R: RefCount, A: Allocator> Clone for RefCountedVector<T, R, A> {
     fn clone(&self) -> Self {
