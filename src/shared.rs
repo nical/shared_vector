@@ -427,24 +427,21 @@ impl<T, R: RefCount, A: Allocator> RefCountedVector<T, R, A> {
         T: Clone,
     {
         let allocator = self.inner.clone_allocator();
-        if is_unique {
+        if is_unique && self.capacity() > 0 {
             // The buffer is not large enough, we'll have to create a new one, however we
             // know that we have the only reference to it so we'll move the data with
             // a simple memcpy instead of cloning it.
-            unsafe {
-                let mut dst = Self::try_with_allocator(new_cap, allocator)?;
-                let len = self.len();
-                if len > 0 {
-                    ptr::copy_nonoverlapping(
-                        self.inner.data_ptr(),
-                        dst.inner.data_ptr(),
-                        len,
-                    );
-                    dst.inner.set_len(len as BufferSize);
-                    self.inner.set_len(0);
-                }
 
-                self.inner = dst.inner;
+            unsafe {
+                use crate::raw::{Header, buffer_layout};
+                let old_cap = self.capacity();
+                let old_header = self.inner.header;
+                let old_layout = buffer_layout::<Header<R, A>, T>(old_cap).unwrap();
+                let new_layout = buffer_layout::<Header<R, A>, T>(new_cap).unwrap();
+                let new_alloc = allocator.realloc(old_header.cast(), old_layout, new_layout.size())?;
+                self.inner.header = new_alloc.ptr.cast();
+                self.inner.header.as_mut().vec.cap = new_cap as BufferSize;
+
                 return Ok(());
             }
         }
