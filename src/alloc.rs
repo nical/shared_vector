@@ -1,4 +1,4 @@
-use std::ptr::{self, NonNull};
+use std::{ptr::{self, NonNull}, sync::atomic::{AtomicUsize, AtomicI32, Ordering}};
 pub use std::alloc::Layout;
 
 /// Error type for APIs with fallible heap allocation
@@ -13,6 +13,11 @@ pub enum AllocError {
     },
 }
 
+/// The pointer and size resulting from a memory allocation.
+///
+/// Note: to make `Allocator` more like the standard version it woud be nice to replace
+/// this struct with `NonNull<[u8]>`. That probably requires `NonNull::slice_from_raw_parts`
+/// which is nightly-only at the moment.
 pub struct Allocation {
     pub ptr: NonNull<u8>,
     pub size: usize,
@@ -82,5 +87,118 @@ impl Allocator for GlobalAllocator {
 
     unsafe fn dealloc(&self, ptr: NonNull<u8>, layout: Layout) {
         std::alloc::dealloc(ptr.as_ptr(), layout)
+    }
+}
+
+pub trait AsMutBytes {
+    unsafe fn as_mut_bytes(&self) -> *mut u8;
+    fn size(&self) -> usize;
+}
+
+impl AsMutBytes for Box<[u8]> {
+    unsafe fn as_mut_bytes(&self) -> *mut u8 {
+        self.as_ptr() as *mut u8
+    }
+    fn size(&self) -> usize {
+        self.len()
+    }
+}
+
+impl<'l> AsMutBytes for &'l mut [u8] {
+    unsafe fn as_mut_bytes(&self) -> *mut u8 {
+        self.as_ptr() as *mut u8
+    }
+
+    fn size(&self) -> usize {
+        self.len()
+    }
+}
+
+/// A very simple thread-safe bump allocator using a single pre-allocatec buffer.
+pub struct BoundedBumpAllocator<Buffer: AsMutBytes> {
+    buffer: Buffer,
+    head: AtomicUsize,
+    live_allocations: AtomicI32,
+}
+
+impl BoundedBumpAllocator<Box<[u8]>> {
+    pub fn with_capacity(cap: usize) -> Self {
+        let buffer: Box<[u8]> = vec![0; cap].into_boxed_slice();
+        BoundedBumpAllocator::with_buffer(buffer)
+    }
+}
+
+
+impl<Buffer: AsMutBytes> BoundedBumpAllocator<Buffer> {
+    /// Allocates a bump allocator with a buffer of `size` bytes.
+    pub fn with_buffer(buffer: Buffer) -> Self {
+        BoundedBumpAllocator { buffer, head: AtomicUsize::new(0), live_allocations: AtomicI32::new(0) }
+    }
+
+    /// Returns true if there is no live allocations from this allocator.
+    pub fn can_reset(&self) -> bool {
+        self.live_allocations.load(Ordering::SeqCst) == 0
+    }
+
+    /// Resets the bump allocator.
+    ///
+    /// Panics if there are live allocations from this allocator.
+    pub fn reset(&self) {
+        assert!(self.can_reset());
+        self.head.store(0, Ordering::SeqCst);
+    }
+
+    unsafe fn allocate(&self, layout: Layout) -> Result<Allocation, AllocError> {
+        let mut offset;
+        loop {
+            offset = self.head.load(Ordering::SeqCst);
+            let mut size = layout.size();
+            let rem = offset % layout.align();
+            if rem != 0 {
+                size += layout.align() - rem;
+            }
+            if offset + size > self.buffer.size() {
+                return Err(AllocError::Allocator { layout });
+            }
+            if self.head.compare_exchange(offset, offset + size, Ordering::SeqCst, Ordering::Relaxed).is_ok() {
+                break;
+            }
+        }
+
+        let ptr = NonNull::new_unchecked(self.buffer.as_mut_bytes().add(offset));
+        self.live_allocations.fetch_add(1, Ordering::SeqCst);
+
+        Ok(Allocation { ptr, size: layout.size() })
+    }
+
+    unsafe fn deallocate(&self, _ptr: NonNull<u8>, _layout: Layout) {
+        self.live_allocations.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl<Buffer: AsMutBytes> Drop for BoundedBumpAllocator<Buffer> {
+    /// Panics if there are live allocations from this allocator.
+    fn drop(&mut self) {
+        assert!(self.can_reset());
+    }
+}
+
+impl<'l, Buffer: AsMutBytes> Allocator for &'l BoundedBumpAllocator<Buffer> {
+    unsafe fn alloc(&self, layout: Layout) -> Result<Allocation, AllocError> {
+        self.allocate(layout)
+    }
+
+    unsafe fn dealloc(&self, _ptr: NonNull<u8>, _layout: Layout) {
+        self.deallocate(_ptr, _layout)
+    }
+}
+
+impl<Buffer: AsMutBytes> Allocator for std::sync::Arc<BoundedBumpAllocator<Buffer>> {
+    unsafe fn alloc(&self, layout: Layout) -> Result<Allocation, AllocError> {
+        self.allocate(layout)
+    }
+
+    unsafe fn dealloc(&self, _ptr: NonNull<u8>, _layout: Layout) {
+        self.deallocate(_ptr, _layout)
     }
 }

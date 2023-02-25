@@ -591,69 +591,12 @@ impl<T: Debug, A: Allocator> Debug for UniqueVector<T, A> {
 
 #[test]
 fn bump_alloc() {
-    use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
-    use crate::alloc::{Allocation, Layout};
+    use crate::alloc::BoundedBumpAllocator;
 
-    pub struct BumpAllocator {
-        buf: *mut u8,
-        size: usize,
-        head: AtomicUsize,
-        live_allocations: AtomicI32,
-    }
-
-    impl BumpAllocator {
-        fn new(size: usize) -> Self {
-            unsafe {
-                let layout = Layout::from_size_align(size, 64).unwrap();
-                let buf = std::alloc::alloc(layout);
-    
-                BumpAllocator { buf, size, head: AtomicUsize::new(0), live_allocations: AtomicI32::new(0) }
-            }
-        }
-    }
-
-    impl<'l> Allocator for &'l BumpAllocator {
-        unsafe fn alloc(&self, layout: Layout) -> Result<Allocation, AllocError> {
-            let mut offset;
-            loop {
-                offset = self.head.load(Ordering::SeqCst);
-                let mut size = layout.size();
-                let rem = offset % layout.align();
-                if rem != 0 {
-                    size += layout.align() - rem;
-                }
-                if offset + size > self.size {
-                    return Err(AllocError::Allocator { layout });
-                }    
-                if self.head.compare_exchange(offset, offset + size, Ordering::SeqCst, Ordering::Relaxed).is_ok() {
-                    break;
-                }
-            }
-
-            let ptr = NonNull::new_unchecked(self.buf.add(offset));
-            self.live_allocations.fetch_add(1, Ordering::SeqCst);
-
-            Ok(Allocation { ptr, size: layout.size() })
-        }
-
-        unsafe fn dealloc(&self, _ptr: NonNull<u8>, _layout: Layout) {
-            self.live_allocations.fetch_sub(1, Ordering::SeqCst);
-        }
-    }
-
-    impl Drop for BumpAllocator {
-        fn drop(&mut self) {
-            unsafe {
-                std::alloc::dealloc(self.buf, Layout::from_size_align(self.size, 64).unwrap());
-            }
-        }
-    }
-
-
-    let allocator = BumpAllocator::new(4096 * 8);
+    let allocator = BoundedBumpAllocator::with_capacity(4096);
 
     {
-        let mut v1: UniqueVector<u32, &BumpAllocator> = UniqueVector::try_with_allocator(4, &allocator).unwrap();
+        let mut v1: UniqueVector<u32, &BoundedBumpAllocator<Box<[u8]>>> = UniqueVector::try_with_allocator(4, &allocator).unwrap();
         v1.push(0);
         v1.push(1);
         v1.push(2);
@@ -682,8 +625,6 @@ fn bump_alloc() {
         assert_eq!(v1.as_slice(), &[0, 1, 2, 3, 4]);
         assert_eq!(v2.as_slice(), &[10, 11, 12, 13, 14]);
     }
-
-    assert_eq!(allocator.live_allocations.load(Ordering::SeqCst), 0);
 }
 
 #[test]
