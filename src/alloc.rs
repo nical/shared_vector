@@ -1,5 +1,7 @@
-use std::{ptr::{self, NonNull}, sync::atomic::{AtomicUsize, AtomicI32, Ordering}};
+use std::{ptr::{self, NonNull}, sync::atomic::{AtomicUsize, AtomicI32, Ordering}, cell::UnsafeCell};
 pub use std::alloc::Layout;
+
+use crate::UniqueVector;
 
 /// Error type for APIs with fallible heap allocation
 #[derive(Debug)]
@@ -188,8 +190,8 @@ impl<'l, Buffer: AsMutBytes> Allocator for &'l BoundedBumpAllocator<Buffer> {
         self.allocate(layout)
     }
 
-    unsafe fn dealloc(&self, _ptr: NonNull<u8>, _layout: Layout) {
-        self.deallocate(_ptr, _layout)
+    unsafe fn dealloc(&self, ptr: NonNull<u8>, layout: Layout) {
+        self.deallocate(ptr, layout)
     }
 }
 
@@ -198,7 +200,199 @@ impl<Buffer: AsMutBytes> Allocator for std::sync::Arc<BoundedBumpAllocator<Buffe
         self.allocate(layout)
     }
 
-    unsafe fn dealloc(&self, _ptr: NonNull<u8>, _layout: Layout) {
-        self.deallocate(_ptr, _layout)
+    unsafe fn dealloc(&self, ptr: NonNull<u8>, layout: Layout) {
+        self.deallocate(ptr, layout)
+    }
+}
+
+impl<Buffer: AsMutBytes> Allocator for std::rc::Rc<BoundedBumpAllocator<Buffer>> {
+    unsafe fn alloc(&self, layout: Layout) -> Result<Allocation, AllocError> {
+        self.allocate(layout)
+    }
+
+    unsafe fn dealloc(&self, ptr: NonNull<u8>, layout: Layout) {
+        self.deallocate(ptr, layout)
+    }
+}
+
+pub struct SingleThreadedBumpAllocator<A: Allocator> {
+    inner: UnsafeCell<StbaInner<A>>,
+    allocator: A,
+    buffer_layout: Layout,
+}
+
+struct StbaInner<A: Allocator> {
+    current: StbaBuffer,
+    others: UniqueVector<StbaBuffer, A>,
+    live_allocations: i32,
+    last_alloc: Option<NonNull<u8>>,
+}
+
+struct StbaBuffer {
+    buffer: Allocation,
+    head: usize,
+}
+
+
+impl<A: Allocator> SingleThreadedBumpAllocator<A> {
+    pub fn with_allocator(allocator: A, size: usize) -> Result<Self, AllocError> {
+        let layout = Layout::from_size_align(size, 64).unwrap(); // TODO: unwrap
+        let buffer = unsafe { allocator.alloc(layout)? };
+
+        Ok(SingleThreadedBumpAllocator {
+            inner: UnsafeCell::new(StbaInner {
+                current: StbaBuffer {
+                    buffer,
+                    head: 0,
+                },
+                others: UniqueVector::try_with_allocator(8, allocator.clone())?,
+                live_allocations: 0,
+                last_alloc: None,
+            }),
+            allocator,
+            buffer_layout: layout,
+        })
+    }
+
+    unsafe fn inner(&self) -> &mut StbaInner<A> {
+        &mut *self.inner.get()
+    }
+
+    unsafe fn allocate_new_buffer(&self) -> Result<(), AllocError> {
+        let buffer = unsafe { self.allocator.alloc(self.buffer_layout)? };
+
+        let inner = self.inner();
+        let current = std::mem::replace(&mut inner.current, StbaBuffer { buffer, head: 0 });
+        inner.others.push(current);
+
+        Ok(())
+    }
+
+    unsafe fn allocate(&self, layout: Layout) -> Result<Allocation, AllocError> {
+        let status = self.allocate_in_current_buffer(layout);
+        if status.is_ok() {
+            return status;
+        }
+
+        self.allocate_new_buffer()?;
+
+        self.allocate_in_current_buffer(layout)
+    }
+
+    unsafe fn allocate_in_current_buffer(&self, layout: Layout) -> Result<Allocation, AllocError> {
+        let inner = self.inner();
+        let current = &mut inner.current;
+        let offset = current.head;
+        let mut size = layout.size();
+        let rem = offset % layout.align();
+        if rem != 0 {
+            size += layout.align() - rem;
+        }
+        if offset + size > current.buffer.size {
+            return Err(AllocError::Allocator { layout });
+        }
+
+        current.head += size;
+
+        let ptr = NonNull::new_unchecked(current.buffer.ptr.as_ptr().add(offset));
+        inner.last_alloc = Some(ptr);
+        inner.live_allocations += 1;
+
+        Ok(Allocation { ptr, size: layout.size() })
+    }
+
+    unsafe fn deallocate(&self, ptr: NonNull<u8>, _layout: Layout) {
+        let inner = self.inner();
+
+        if inner.last_alloc == Some(ptr) {
+            let current = &mut inner.current;
+            let diff = current.buffer.ptr.as_ptr().add(current.head) as usize - ptr.as_ptr() as usize;
+            current.head -= diff;
+        }
+
+        inner.live_allocations -= 1;
+        assert!(inner.live_allocations >= 0);
+    }
+
+    unsafe fn try_grow(&self, ptr: NonNull<u8>, new_layout: Layout, new_size: usize) -> Option<Allocation> {
+        let inner = self.inner();
+        let current = &mut inner.current;
+
+        if inner.last_alloc == Some(ptr) && ptr.as_ptr() as usize % new_layout.align() == 0{
+            if current.buffer.size - current.head <= new_size {
+                let diff = current.buffer.ptr.as_ptr().add(current.head) as usize - ptr.as_ptr() as usize;
+                current.head += diff;
+                return Some(Allocation { ptr , size: new_size });
+            }
+        }
+
+        None
+    }
+
+    unsafe fn reallocate(&self, ptr: NonNull<u8>, old_layout: Layout, new_size: usize) -> Result<Allocation, AllocError> {
+        unsafe {
+            let new_layout = Layout::from_size_align_unchecked(new_size, old_layout.align());
+
+            // First see if we can simply grow the current allocation.
+            if let Some(alloc) = self.try_grow(ptr, new_layout, new_size) {
+                return Ok(alloc);
+            }
+
+            let new_alloc = self.allocate(new_layout);
+            self.inner().live_allocations -= 1;
+
+            if let Ok(new_alloc) = &new_alloc {
+                let size = std::cmp::min(new_layout.size(), new_size);
+                ptr::copy_nonoverlapping(ptr.as_ptr(), new_alloc.ptr.as_ptr(), size);
+            }
+
+            new_alloc
+        }
+    }
+}
+
+impl<A: Allocator> Drop for SingleThreadedBumpAllocator<A> {
+    fn drop(&mut self) {
+        unsafe {
+            let inner = self.inner();
+            self.allocator.dealloc(inner.current.buffer.ptr, self.buffer_layout);
+            for other in &inner.others {
+                self.allocator.dealloc(other.buffer.ptr, self.buffer_layout);
+            }
+        }
+    }
+}
+
+impl<'l, A: Allocator> Allocator for &'l SingleThreadedBumpAllocator<A> {
+    unsafe fn alloc(&self, layout: Layout) -> Result<Allocation, AllocError> {
+        self.allocate(layout)
+    }
+
+    unsafe fn dealloc(&self, ptr: NonNull<u8>, layout: Layout) {
+        self.deallocate(ptr, layout)
+    }
+
+    unsafe fn realloc(&self, ptr: NonNull<u8>, old_layout: Layout, new_size: usize) -> Result<Allocation, AllocError> {
+        self.reallocate(ptr, old_layout, new_size)
+    }
+}
+
+impl<A: Allocator> Allocator for std::sync::Arc<SingleThreadedBumpAllocator<A>> {
+    unsafe fn alloc(&self, layout: Layout) -> Result<Allocation, AllocError> {
+        self.allocate(layout)
+    }
+
+    unsafe fn dealloc(&self, ptr: NonNull<u8>, layout: Layout) {
+        self.deallocate(ptr, layout)
+    }
+}
+
+impl<A: Allocator> Allocator for std::rc::Rc<SingleThreadedBumpAllocator<A>> {
+    unsafe fn alloc(&self, layout: Layout) -> Result<Allocation, AllocError> {
+        self.allocate(layout)
+    }
+
+    unsafe fn dealloc(&self, ptr: NonNull<u8>, layout: Layout) {
+        self.deallocate(ptr, layout)
     }
 }
