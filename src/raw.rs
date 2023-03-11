@@ -98,12 +98,12 @@ const fn header_size<Header, T>() -> usize {
 pub fn buffer_layout<Header, T>(n: usize) -> Result<Layout, AllocError> {
     let size = mem::size_of::<T>()
         .checked_mul(n)
-        .ok_or(AllocError::CapacityOverflow)?;
+        .ok_or(AllocError)?;
     let align = mem::align_of::<Header>().max(mem::align_of::<T>());
     let align = if mem::size_of::<T>() < 64 { align } else { align.max(64) };
     let header_size = header_size::<Header, T>();
 
-    Layout::from_size_align(header_size + size, align).map_err(|_| AllocError::CapacityOverflow)
+    Layout::from_size_align(header_size + size, align).map_err(|_| AllocError)
 }
 
 pub unsafe fn drop_items<T>(mut ptr: *mut T, count: u32) {
@@ -116,12 +116,12 @@ pub unsafe fn drop_items<T>(mut ptr: *mut T, count: u32) {
 pub unsafe fn dealloc<T, R, A: Allocator>(mut ptr: NonNull<Header<R, A>>, cap: BufferSize) {
     let layout = buffer_layout::<Header<R, A>, T>(cap as usize).unwrap();
     let allocator = ptr::read(&ptr.as_mut().allocator);
-    allocator.dealloc(ptr.cast::<u8>(), layout);
+    allocator.deallocate(ptr.cast::<u8>(), layout);
 }
 
 #[cold]
 fn capacity_error() -> AllocError {
-    AllocError::CapacityOverflow
+    AllocError
 }
 
 
@@ -152,9 +152,9 @@ impl<T, R: RefCount, A: Allocator> HeaderBuffer<T, R, A> {
             }
 
             let layout = buffer_layout::<Header<R, A>, T>(cap)?;
-            let allocation = allocator.alloc(layout)?;
+            let allocation = allocator.allocate(layout)?;
             // TODO: allocation could provide more capcity than what was requrested.
-            let alloc: NonNull<Header<R, A>> = allocation.ptr.cast();
+            let alloc: NonNull<Header<R, A>> = allocation.cast();
 
             let header = Header {
                 vec: VecHeader { cap: cap as BufferSize, len: 0 },
@@ -229,7 +229,7 @@ impl<T, R: RefCount, A: Allocator> HeaderBuffer<T, R, A> {
     where
         T: Clone,
         R: RefCount,
-        A: Allocator,
+        A: Allocator + Clone,
     {
         unsafe {
             let header = self.header.as_ref();
@@ -268,7 +268,7 @@ impl<T, R: RefCount, A: Allocator> HeaderBuffer<T, R, A> {
     where
         T: Copy,
         R: RefCount,
-        A: Allocator,
+        A: Allocator + Clone,
     {
         unsafe {
             let header = self.header.as_ref();
@@ -327,8 +327,8 @@ impl<T, R: RefCount, A: Allocator> HeaderBuffer<T, R, A> {
     }
 
     #[inline]
-    pub fn clone_allocator(&self) -> A {
-        unsafe { self.header.as_ref().allocator.clone() }
+    pub fn allocator(&self) -> &A {
+        unsafe { &self.header.as_ref().allocator }
     }
 
     #[inline]
