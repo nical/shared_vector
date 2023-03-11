@@ -18,3 +18,6 @@ harness = false
 
 [profile.release]
 debug = true
+
+[dependencies]
+allocator-api2 = "0.2.4"
