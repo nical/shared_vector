@@ -1,9 +1,9 @@
-use std::{ptr, mem};
-use std::ops::{Index, IndexMut, Deref, DerefMut};
-use std::ptr::NonNull;
-use std::fmt::Debug;
+use core::{ptr, mem};
+use core::ops::{Index, IndexMut, Deref, DerefMut};
+use core::ptr::NonNull;
+use core::fmt::Debug;
 
-use crate::alloc::{AllocError, GlobalAllocator, Allocator};
+use crate::alloc::{Allocator, Global, AllocError};
 use crate::raw::{self, BufferSize, HeaderBuffer, VecHeader, RefCount, AtomicRefCount, Header, buffer_layout};
 use crate::shared::{AtomicSharedVector, SharedVector};
 use crate::{grow_amortized, DefaultRefCount};
@@ -26,44 +26,44 @@ use crate::{grow_amortized, DefaultRefCount};
 /// allocated buffer. Room for a 16 bytes header is left before the first element so that the
 /// vector can be converted into a `SharedVector` or `AtomicSharedVector` without reallocating
 /// the storage.
-pub struct UniqueVector<T, A: Allocator + Clone = GlobalAllocator> {
+pub struct UniqueVector<T, A: Allocator + Clone = Global> {
     pub(crate) data: NonNull<T>,
     pub(crate) len: BufferSize,
     pub(crate) cap: BufferSize,
     pub(crate) allocator: A,
 }
 
-impl<T> UniqueVector<T, GlobalAllocator> {
+impl<T> UniqueVector<T, Global> {
     /// Creates an empty vector.
     ///
     /// This does not allocate memory.
-    pub fn new() -> UniqueVector<T, GlobalAllocator> {
+    pub fn new() -> UniqueVector<T, Global> {
         UniqueVector {
             data: NonNull::dangling(),
             len: 0,
             cap: 0,
-            allocator: GlobalAllocator
+            allocator: Global
         }
     }
 
     /// Creates an empty pre-allocated vector with a given storage capacity.
     ///
     /// Does not allocate memory if `cap` is zero.
-    pub fn with_capacity(cap: usize) -> UniqueVector<T, GlobalAllocator> {
+    pub fn with_capacity(cap: usize) -> UniqueVector<T, Global> {
         Self::try_with_capacity(cap).unwrap()
     }
 
     /// Creates an empty pre-allocated vector with a given storage capacity.
     ///
     /// Does not allocate memory if `cap` is zero.
-    pub fn try_with_capacity(cap: usize) -> Result<UniqueVector<T, GlobalAllocator>, AllocError> {
-        let inner: HeaderBuffer<T, DefaultRefCount, GlobalAllocator> = HeaderBuffer::try_with_capacity(cap, GlobalAllocator)?;
+    pub fn try_with_capacity(cap: usize) -> Result<UniqueVector<T, Global>, AllocError> {
+        let inner: HeaderBuffer<T, DefaultRefCount, Global> = HeaderBuffer::try_with_capacity(cap, Global)?;
         let cap = inner.capacity();
         let data = NonNull::new(inner.data_ptr()).unwrap();
 
         mem::forget(inner);
 
-        Ok(UniqueVector { data, len: 0, cap, allocator: GlobalAllocator })
+        Ok(UniqueVector { data, len: 0, cap, allocator: Global })
     }
 
     pub fn from_slice(data: &[T]) -> Self
@@ -77,7 +77,7 @@ impl<T> UniqueVector<T, GlobalAllocator> {
     }
 
     /// Creates a vector with `n` copies of `elem`.
-    pub fn from_elem(elem: T, n: usize) -> UniqueVector<T, GlobalAllocator>
+    pub fn from_elem(elem: T, n: usize) -> UniqueVector<T, Global>
     where
         T: Clone,
     {
@@ -133,12 +133,12 @@ impl<T, A: Allocator + Clone> UniqueVector<T, A> {
 
     #[inline]
     pub fn as_slice(&self) -> &[T] {
-        unsafe { std::slice::from_raw_parts(self.data_ptr(), self.len()) }
+        unsafe { core::slice::from_raw_parts(self.data_ptr(), self.len()) }
     }
 
     #[inline]
     pub fn as_mut_slice(&mut self) -> &mut [T] {
-        unsafe { std::slice::from_raw_parts_mut(self.data_ptr(), self.len()) }
+        unsafe { core::slice::from_raw_parts_mut(self.data_ptr(), self.len()) }
     }
 
     /// Clears the vector, removing all values.
@@ -535,7 +535,7 @@ impl<T, A: Allocator + Clone> AsMut<[T]> for UniqueVector<T, A> {
     }
 }
 
-impl<T> Default for UniqueVector<T, GlobalAllocator> {
+impl<T> Default for UniqueVector<T, Global> {
     fn default() -> Self {
         Self::new()
     }
@@ -543,25 +543,25 @@ impl<T> Default for UniqueVector<T, GlobalAllocator> {
 
 impl<'a, T, A: Allocator + Clone> IntoIterator for &'a UniqueVector<T, A> {
     type Item = &'a T;
-    type IntoIter = std::slice::Iter<'a, T>;
-    fn into_iter(self) -> std::slice::Iter<'a, T> {
+    type IntoIter = core::slice::Iter<'a, T>;
+    fn into_iter(self) -> core::slice::Iter<'a, T> {
         self.as_slice().iter()
     }
 }
 
 impl<'a, T, A: Allocator + Clone> IntoIterator for &'a mut UniqueVector<T, A> {
     type Item = &'a mut T;
-    type IntoIter = std::slice::IterMut<'a, T>;
-    fn into_iter(self) -> std::slice::IterMut<'a, T> {
+    type IntoIter = core::slice::IterMut<'a, T>;
+    fn into_iter(self) -> core::slice::IterMut<'a, T> {
         self.as_mut_slice().iter_mut()
     }
 }
 
 impl<T, A: Allocator + Clone, I> Index<I> for UniqueVector<T, A>
 where
-    I: std::slice::SliceIndex<[T]>,
+    I: core::slice::SliceIndex<[T]>,
 {
-    type Output = <I as std::slice::SliceIndex<[T]>>::Output;
+    type Output = <I as core::slice::SliceIndex<[T]>>::Output;
     fn index(&self, index: I) -> &Self::Output {
         self.as_slice().index(index)
     }
@@ -569,7 +569,7 @@ where
 
 impl<T, A: Allocator + Clone, I> IndexMut<I> for UniqueVector<T, A>
 where
-    I: std::slice::SliceIndex<[T]>,
+    I: core::slice::SliceIndex<[T]>,
 {
     fn index_mut(&mut self, index: I) -> &mut Self::Output {
         self.as_mut_slice().index_mut(index)
@@ -590,19 +590,19 @@ impl<T, A: Allocator + Clone> DerefMut for UniqueVector<T, A> {
 }
 
 impl<T: Debug, A: Allocator + Clone> Debug for UniqueVector<T, A> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> Result<(), core::fmt::Error> {
         self.as_slice().fmt(f)
     }
 }
 
 #[test]
 fn bump_alloc() {
-    use crate::alloc::{BoundedBumpAllocator, HeapAllocation};
+    use blink_alloc::BlinkAlloc;
 
-    let allocator = BoundedBumpAllocator::with_capacity(4096);
+    let allocator = BlinkAlloc::new();
 
     {
-        let mut v1: UniqueVector<u32, &BoundedBumpAllocator<HeapAllocation>> = UniqueVector::try_with_allocator(4, &allocator).unwrap();
+        let mut v1: UniqueVector<u32, &BlinkAlloc> = UniqueVector::try_with_allocator(4, &allocator).unwrap();
         v1.push(0);
         v1.push(1);
         v1.push(2);

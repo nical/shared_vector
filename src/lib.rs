@@ -3,12 +3,14 @@
 mod raw;
 mod shared;
 mod unique;
-mod alloc;
 
 pub use raw::{BufferSize, RefCount, AtomicRefCount, DefaultRefCount};
 pub use unique::UniqueVector;
 pub use shared::{SharedVector, AtomicSharedVector, RefCountedVector};
-pub use alloc::*;
+
+pub mod alloc {
+    pub use allocator_api2::alloc::{Allocator, Global, AllocError};
+}
 
 pub(crate) fn grow_amortized(len: usize, additional: usize) -> usize {
     let required = len.saturating_add(additional);
@@ -106,11 +108,11 @@ macro_rules! arc_vector {
 
 #[test]
 fn vector_macro() {
-    use crate::alloc::GlobalAllocator;
+    pub use allocator_api2::alloc::{Allocator, Global};
 
     let v1: UniqueVector<u32> = vector![0, 1, 2, 3, 4, 5];
     let v2: UniqueVector<u32> = vector![2; 4];
-    let v3: UniqueVector<u32> = vector!(using GlobalAllocator => [6, 7]);
+    let v3: UniqueVector<u32> = vector!(using Global => [6, 7]);
     assert_eq!(v1.as_slice(), &[0, 1, 2, 3, 4, 5]);
     assert_eq!(v2.as_slice(), &[2, 2, 2, 2]);
     assert_eq!(v3.as_slice(), &[6, 7]);
@@ -118,14 +120,14 @@ fn vector_macro() {
 
     let v1: SharedVector<u32> = rc_vector![0, 1, 2, 3, 4, 5];
     let v2: SharedVector<u32> = rc_vector![3; 5];
-    let v3: SharedVector<u32> = rc_vector!(using GlobalAllocator => [4; 3]);
+    let v3: SharedVector<u32> = rc_vector!(using Global => [4; 3]);
     assert_eq!(v1.as_slice(), &[0, 1, 2, 3, 4, 5]);
     assert_eq!(v2.as_slice(), &[3, 3, 3, 3, 3]);
     assert_eq!(v3.as_slice(), &[4, 4, 4]);
 
     let v1: AtomicSharedVector<u32> = arc_vector![0, 1, 2, 3, 4, 5];
     let v2: AtomicSharedVector<u32> = arc_vector![1; 4];
-    let v3: AtomicSharedVector<u32> = arc_vector![using GlobalAllocator => [3, 2, 1]];
+    let v3: AtomicSharedVector<u32> = arc_vector![using Global => [3, 2, 1]];
     assert_eq!(v1.as_slice(), &[0, 1, 2, 3, 4, 5]);
     assert_eq!(v2.as_slice(), &[1, 1, 1, 1]);
     assert_eq!(v3.as_slice(), &[3, 2, 1]);
