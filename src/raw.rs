@@ -1,11 +1,11 @@
-use std::alloc::Layout;
-use std::marker::PhantomData;
-use std::mem;
-use std::ptr::{self, NonNull};
-use std::sync::atomic::{AtomicI32, Ordering::{Acquire, Release, Relaxed}};
-use std::cell::UnsafeCell;
+use core::alloc::Layout;
+use core::marker::PhantomData;
+use core::mem;
+use core::ptr::{self, NonNull};
+use core::sync::atomic::{AtomicI32, Ordering::{Acquire, Release, Relaxed}};
+use core::cell::UnsafeCell;
 
-use crate::alloc::*;
+pub use crate::alloc::{Allocator, Global, AllocError};
 
 pub type BufferSize = u32;
 
@@ -108,7 +108,7 @@ pub fn buffer_layout<Header, T>(n: usize) -> Result<Layout, AllocError> {
 
 pub unsafe fn drop_items<T>(mut ptr: *mut T, count: u32) {
     for _ in 0..count {
-        std::ptr::drop_in_place(ptr);
+        core::ptr::drop_in_place(ptr);
         ptr = ptr.add(1);
     }
 }
@@ -287,7 +287,7 @@ impl<T, R: RefCount, A: Allocator> HeaderBuffer<T, R, A> {
             let mut clone = HeaderBuffer::try_with_capacity(cap as usize, allocator)?;
         
             if len > 0 {
-                std::ptr::copy_nonoverlapping(self.data_ptr(), clone.data_ptr(), len as usize);
+                core::ptr::copy_nonoverlapping(self.data_ptr(), clone.data_ptr(), len as usize);
                 clone.set_len(len);
             }
         
@@ -302,12 +302,12 @@ impl<T, R: RefCount, A: Allocator> HeaderBuffer<T, R, A> {
 
     #[inline]
     pub fn as_slice(&self) -> &[T] {
-        unsafe { std::slice::from_raw_parts(self.data_ptr(), self.header.as_ref().vec.len as usize) }
+        unsafe { core::slice::from_raw_parts(self.data_ptr(), self.header.as_ref().vec.len as usize) }
     }
 
     #[inline]
     pub fn as_mut_slice(&mut self) -> &mut [T] {
-        unsafe { std::slice::from_raw_parts_mut(self.data_ptr(), self.header.as_ref().vec.len as usize) }
+        unsafe { core::slice::from_raw_parts_mut(self.data_ptr(), self.header.as_ref().vec.len as usize) }
     }
 
     #[inline]
@@ -498,7 +498,7 @@ impl<T, R: RefCount, A: Allocator> Drop for HeaderBuffer<T, R, A> {
                 // See the implementation of std Arc for the need to use this fence. Note that
                 // we only need it for the atomic reference counted version but I don't expect
                 // this to make a measurable difference.
-                std::sync::atomic::fence(Acquire);
+                core::sync::atomic::fence(Acquire);
                 let len = self.header.as_ref().vec.len;
                 drop_items(data_ptr::<Header<R, A>, T>(self.header), len);
                 dealloc::<T, R, A>(self.header, cap);
@@ -510,10 +510,10 @@ impl<T, R: RefCount, A: Allocator> Drop for HeaderBuffer<T, R, A> {
 #[test]
 fn buffer_layout_alignemnt() {
     type B = Box<u32>;
-    let layout = buffer_layout::<Header<DefaultRefCount, GlobalAllocator>, B>(2).unwrap();
+    let layout = buffer_layout::<Header<DefaultRefCount, Global>, B>(2).unwrap();
     assert_eq!(layout.align(), mem::size_of::<B>());
 
-    let atomic_layout = buffer_layout::<Header<AtomicRefCount, GlobalAllocator>, B>(2).unwrap();
+    let atomic_layout = buffer_layout::<Header<AtomicRefCount, Global>, B>(2).unwrap();
 
     assert_eq!(layout, atomic_layout);
 }

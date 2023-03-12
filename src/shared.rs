@@ -1,26 +1,26 @@
-use std::{ptr, mem};
-use std::ops::{Index, IndexMut, Deref, DerefMut};
-use std::ptr::NonNull;
-use std::fmt::Debug;
+use core::{ptr, mem};
+use core::ops::{Index, IndexMut, Deref, DerefMut};
+use core::ptr::NonNull;
+use core::fmt::Debug;
 
 use crate::unique::UniqueVector;
 use crate::raw::{BufferSize, HeaderBuffer};
-use crate::alloc::{AllocError, GlobalAllocator, Allocator};
 use crate::{RefCount, AtomicRefCount, DefaultRefCount, grow_amortized};
+use crate::alloc::{Allocator, Global, AllocError};
 
 /// A heap allocated, atomically reference counted, immutable contiguous buffer containing elements of type `T`.
 ///
 /// <svg width="280" height="120" viewBox="0 0 74.08 31.75" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="a"><stop offset="0" stop-color="#491c9c"/><stop offset="1" stop-color="#d54b27"/></linearGradient><linearGradient xlink:href="#a" id="b" gradientUnits="userSpaceOnUse" x1="6.27" y1="34.86" x2="87.72" y2="13.24" gradientTransform="translate(-2.64 -18.48)"/></defs><rect width="10.57" height="10.66" x="2.66" y="18.48" ry="1.37" fill="#3dbdaa"/><rect width="10.57" height="10.66" x="15.88" y="18.52" ry="1.37" fill="#3dbdaa"/><rect width="10.57" height="10.66" x="29.11" y="18.52" ry="1.37" fill="#3dbdaa"/><circle cx="33.87" cy="18.56" r=".79" fill="#666"/><circle cx="7.41" cy="18.56" r=".79" fill="#666"/><circle cx="20.64" cy="18.56" r=".79" fill="#666"/><path d="M7.38 18.54c.03-2.63-3.41-2.66-3.41-5.31" fill="none" stroke="#999" stroke-width=".86" stroke-linecap="round"/><path d="M20.64 18.56c0-2.91-15.35-1.36-15.35-5.33" fill="none" stroke="#999" stroke-width=".86" stroke-linecap="round"/><path d="M33.87 18.56c0-3.97-27.26-2.68-27.26-5.33" fill="none" stroke="#999" stroke-width=".86" stroke-linecap="round"/><rect width="68.79" height="10.58" x="2.65" y="2.68" ry="1.37" fill="url(#b)"/><rect width="15.35" height="9.51" x="3.18" y="3.21" ry=".9" fill="#78a2d4"/><rect width="9.26" height="9.51" x="19.85" y="3.2" ry=".9" fill="#eaa577"/><rect width="9.26" height="9.51" x="29.64" y="3.22" ry=".9" fill="#eaa577"/><rect width="9.26" height="9.51" x="39.43" y="3.22" ry=".9" fill="#eaa577"/><rect width="9.26" height="9.51" x="49.22" y="3.21" ry=".9" fill="#eaa577"/><circle cx="62.84" cy="7.97" r=".66" fill="#eaa577"/><circle cx="64.7" cy="7.97" r=".66" fill="#eaa577"/><circle cx="66.55" cy="7.97" r=".66" fill="#eaa577"/></svg>
 ///
 /// See [RefCountedVector].
-pub type AtomicSharedVector<T, A = GlobalAllocator> = RefCountedVector<T, AtomicRefCount, A>;
+pub type AtomicSharedVector<T, A = Global> = RefCountedVector<T, AtomicRefCount, A>;
 
 /// A heap allocated, reference counted, immutable contiguous buffer containing elements of type `T`.
 ///
 /// <svg width="280" height="120" viewBox="0 0 74.08 31.75" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="a"><stop offset="0" stop-color="#491c9c"/><stop offset="1" stop-color="#d54b27"/></linearGradient><linearGradient xlink:href="#a" id="b" gradientUnits="userSpaceOnUse" x1="6.27" y1="34.86" x2="87.72" y2="13.24" gradientTransform="translate(-2.64 -18.48)"/></defs><rect width="10.57" height="10.66" x="2.66" y="18.48" ry="1.37" fill="#3dbdaa"/><rect width="10.57" height="10.66" x="15.88" y="18.52" ry="1.37" fill="#3dbdaa"/><rect width="10.57" height="10.66" x="29.11" y="18.52" ry="1.37" fill="#3dbdaa"/><circle cx="33.87" cy="18.56" r=".79" fill="#666"/><circle cx="7.41" cy="18.56" r=".79" fill="#666"/><circle cx="20.64" cy="18.56" r=".79" fill="#666"/><path d="M7.38 18.54c.03-2.63-3.41-2.66-3.41-5.31" fill="none" stroke="#999" stroke-width=".86" stroke-linecap="round"/><path d="M20.64 18.56c0-2.91-15.35-1.36-15.35-5.33" fill="none" stroke="#999" stroke-width=".86" stroke-linecap="round"/><path d="M33.87 18.56c0-3.97-27.26-2.68-27.26-5.33" fill="none" stroke="#999" stroke-width=".86" stroke-linecap="round"/><rect width="68.79" height="10.58" x="2.65" y="2.68" ry="1.37" fill="url(#b)"/><rect width="15.35" height="9.51" x="3.18" y="3.21" ry=".9" fill="#78a2d4"/><rect width="9.26" height="9.51" x="19.85" y="3.2" ry=".9" fill="#eaa577"/><rect width="9.26" height="9.51" x="29.64" y="3.22" ry=".9" fill="#eaa577"/><rect width="9.26" height="9.51" x="39.43" y="3.22" ry=".9" fill="#eaa577"/><rect width="9.26" height="9.51" x="49.22" y="3.21" ry=".9" fill="#eaa577"/><circle cx="62.84" cy="7.97" r=".66" fill="#eaa577"/><circle cx="64.7" cy="7.97" r=".66" fill="#eaa577"/><circle cx="66.55" cy="7.97" r=".66" fill="#eaa577"/></svg>
 ///
 /// See [RefCountedVector].
-pub type SharedVector<T, A = GlobalAllocator> = RefCountedVector<T, DefaultRefCount, A>;
+pub type SharedVector<T, A = Global> = RefCountedVector<T, DefaultRefCount, A>;
 
 /// A heap allocated, reference counted, immutable contiguous buffer containing elements of type `T`.
 ///
@@ -38,35 +38,35 @@ pub type SharedVector<T, A = GlobalAllocator> = RefCountedVector<T, DefaultRefCo
 /// In other words, this type behaves like an [immutable (or persistent) data structure](https://en.wikipedia.org/wiki/Persistent_data_structure)
 /// Actual mutability only happens under the hood as an optimization when a single reference exists.
 #[repr(transparent)]
-pub struct RefCountedVector<T, R: RefCount, A: Allocator = GlobalAllocator> {
+pub struct RefCountedVector<T, R: RefCount, A: Allocator = Global> {
     pub(crate) inner: HeaderBuffer<T, R, A>,
 }
 
-impl<T, R: RefCount> RefCountedVector<T, R, GlobalAllocator> {
+impl<T, R: RefCount> RefCountedVector<T, R, Global> {
     /// Creates an empty shared buffer without allocating memory.
     #[inline]
-    pub fn new() -> RefCountedVector<T, R, GlobalAllocator> {
+    pub fn new() -> RefCountedVector<T, R, Global> {
         RefCountedVector {
-            inner: HeaderBuffer::try_with_capacity(0, GlobalAllocator).unwrap(),
+            inner: HeaderBuffer::try_with_capacity(0, Global).unwrap(),
         }
     }
 
     /// Constructs a new, empty vector with at least the specified capacity.
     #[inline]
-    pub fn with_capacity(cap: usize) -> RefCountedVector<T, R, GlobalAllocator> {
+    pub fn with_capacity(cap: usize) -> RefCountedVector<T, R, Global> {
         RefCountedVector {
-            inner: HeaderBuffer::try_with_capacity(cap, GlobalAllocator).unwrap(),
+            inner: HeaderBuffer::try_with_capacity(cap, Global).unwrap(),
         }
     }
 
     /// Clones the contents of a slice into a new vector.
     #[inline]
-    pub fn from_slice(data: &[T]) -> RefCountedVector<T, R, GlobalAllocator>
+    pub fn from_slice(data: &[T]) -> RefCountedVector<T, R, Global>
     where
         T: Clone,
     {
         RefCountedVector {
-            inner: HeaderBuffer::try_from_slice(data, None, GlobalAllocator).unwrap(),
+            inner: HeaderBuffer::try_from_slice(data, None, Global).unwrap(),
         }
     }
 }
@@ -529,7 +529,7 @@ impl<T, R: RefCount, A: Allocator> AsRef<[T]> for RefCountedVector<T, R, A> {
     }
 }
 
-impl<T, R: RefCount> Default for RefCountedVector<T, R, GlobalAllocator> {
+impl<T, R: RefCount> Default for RefCountedVector<T, R, Global> {
     fn default() -> Self {
         Self::new()
     }
@@ -537,25 +537,25 @@ impl<T, R: RefCount> Default for RefCountedVector<T, R, GlobalAllocator> {
 
 impl<'a, T, R: RefCount, A: Allocator> IntoIterator for &'a RefCountedVector<T, R, A> {
     type Item = &'a T;
-    type IntoIter = std::slice::Iter<'a, T>;
-    fn into_iter(self) -> std::slice::Iter<'a, T> {
+    type IntoIter = core::slice::Iter<'a, T>;
+    fn into_iter(self) -> core::slice::Iter<'a, T> {
         self.as_slice().iter()
     }
 }
 
 impl<'a, T: Clone, R: RefCount, A: Allocator + Clone> IntoIterator for &'a mut RefCountedVector<T, R, A> {
     type Item = &'a mut T;
-    type IntoIter = std::slice::IterMut<'a, T>;
-    fn into_iter(self) -> std::slice::IterMut<'a, T> {
+    type IntoIter = core::slice::IterMut<'a, T>;
+    fn into_iter(self) -> core::slice::IterMut<'a, T> {
         self.as_mut_slice().iter_mut()
     }
 }
 
 impl<T, R: RefCount, A: Allocator, I> Index<I> for RefCountedVector<T, R, A>
 where
-    I: std::slice::SliceIndex<[T]>,
+    I: core::slice::SliceIndex<[T]>,
 {
-    type Output = <I as std::slice::SliceIndex<[T]>>::Output;
+    type Output = <I as core::slice::SliceIndex<[T]>>::Output;
     fn index(&self, index: I) -> &Self::Output {
         self.as_slice().index(index)
     }
@@ -565,7 +565,7 @@ impl<T, R: RefCount, A: Allocator, I> IndexMut<I> for RefCountedVector<T, R, A>
 where
     T: Clone,
     A: Clone,
-    I: std::slice::SliceIndex<[T]>,
+    I: core::slice::SliceIndex<[T]>,
 {
     fn index_mut(&mut self, index: I) -> &mut Self::Output {
         self.as_mut_slice().index_mut(index)
@@ -586,7 +586,7 @@ impl<T: Clone, R: RefCount, A: Allocator + Clone> DerefMut for RefCountedVector<
 }
 
 impl<T: Debug, R: RefCount, A: Allocator> Debug for RefCountedVector<T, R, A> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> Result<(), core::fmt::Error> {
         self.as_slice().fmt(f)
     }
 }
