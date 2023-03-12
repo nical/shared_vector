@@ -15,30 +15,30 @@ use crate::{grow_amortized, DefaultRefCount};
 /// Similar in principle to a `Vec<T>`.
 /// It can be converted for free into an immutable `SharedVector<T>` or `AtomicSharedVector<T>`.
 ///
-/// Unique and shared vectors expose similar functionality. `UniqueVector` takes advantage of
+/// Unique and shared vectors expose similar functionality. `Vector` takes advantage of
 /// the guaranteed uniqueness at the type level to provide overall faster operations than its
 /// shared counterparts, while its memory layout makes it very cheap to convert to a shared vector
 /// (involving not allocation or copy).
 ///
 /// # Internal representation
 ///
-/// `UniqueVector` stores its length and capacity inline and points to the first element of the
+/// `Vector` stores its length and capacity inline and points to the first element of the
 /// allocated buffer. Room for a 16 bytes header is left before the first element so that the
 /// vector can be converted into a `SharedVector` or `AtomicSharedVector` without reallocating
 /// the storage.
-pub struct UniqueVector<T, A: Allocator + Clone = Global> {
+pub struct Vector<T, A: Allocator + Clone = Global> {
     pub(crate) data: NonNull<T>,
     pub(crate) len: BufferSize,
     pub(crate) cap: BufferSize,
     pub(crate) allocator: A,
 }
 
-impl<T> UniqueVector<T, Global> {
+impl<T> Vector<T, Global> {
     /// Creates an empty vector.
     ///
     /// This does not allocate memory.
-    pub fn new() -> UniqueVector<T, Global> {
-        UniqueVector {
+    pub fn new() -> Vector<T, Global> {
+        Vector {
             data: NonNull::dangling(),
             len: 0,
             cap: 0,
@@ -49,21 +49,21 @@ impl<T> UniqueVector<T, Global> {
     /// Creates an empty pre-allocated vector with a given storage capacity.
     ///
     /// Does not allocate memory if `cap` is zero.
-    pub fn with_capacity(cap: usize) -> UniqueVector<T, Global> {
+    pub fn with_capacity(cap: usize) -> Vector<T, Global> {
         Self::try_with_capacity(cap).unwrap()
     }
 
     /// Creates an empty pre-allocated vector with a given storage capacity.
     ///
     /// Does not allocate memory if `cap` is zero.
-    pub fn try_with_capacity(cap: usize) -> Result<UniqueVector<T, Global>, AllocError> {
+    pub fn try_with_capacity(cap: usize) -> Result<Vector<T, Global>, AllocError> {
         let inner: HeaderBuffer<T, DefaultRefCount, Global> = HeaderBuffer::try_with_capacity(cap, Global)?;
         let cap = inner.capacity();
         let data = NonNull::new(inner.data_ptr()).unwrap();
 
         mem::forget(inner);
 
-        Ok(UniqueVector { data, len: 0, cap, allocator: Global })
+        Ok(Vector { data, len: 0, cap, allocator: Global })
     }
 
     pub fn from_slice(data: &[T]) -> Self
@@ -77,7 +77,7 @@ impl<T> UniqueVector<T, Global> {
     }
 
     /// Creates a vector with `n` copies of `elem`.
-    pub fn from_elem(elem: T, n: usize) -> UniqueVector<T, Global>
+    pub fn from_elem(elem: T, n: usize) -> Vector<T, Global>
     where
         T: Clone,
     {
@@ -101,7 +101,7 @@ impl<T> UniqueVector<T, Global> {
     }
 }
 
-impl<T, A: Allocator + Clone> UniqueVector<T, A> {
+impl<T, A: Allocator + Clone> Vector<T, A> {
     #[inline]
     /// Returns `true` if the vector contains no elements.
     pub fn is_empty(&self) -> bool {
@@ -169,19 +169,19 @@ impl<T, A: Allocator + Clone> UniqueVector<T, A> {
     }
 }
 
-impl<T, A: Allocator + Clone> UniqueVector<T, A> {
+impl<T, A: Allocator + Clone> Vector<T, A> {
     // TODO: remove Clone bound on the allocator.
     /// Creates an empty pre-allocated vector with a given storage capacity.
     ///
     /// Does not allocate memory if `cap` is zero.
-    pub fn try_with_allocator(cap: usize, allocator: A) -> Result<UniqueVector<T, A>, AllocError> where A: Clone {
+    pub fn try_with_capacity_in(cap: usize, allocator: A) -> Result<Vector<T, A>, AllocError> where A: Clone {
         let inner: HeaderBuffer<T, DefaultRefCount, A> = HeaderBuffer::try_with_capacity(cap, allocator.clone())?;
         let cap = inner.capacity();
         let data = NonNull::new(inner.data_ptr()).unwrap();
 
         mem::forget(inner);
 
-        Ok(UniqueVector { data, len: 0, cap, allocator })
+        Ok(Vector { data, len: 0, cap, allocator })
     }
 
     /// Make this vector immutable.
@@ -191,7 +191,7 @@ impl<T, A: Allocator + Clone> UniqueVector<T, A> {
     #[inline]
     pub fn into_shared(self) -> SharedVector<T, A> where A: Allocator + Clone {
         if self.cap == 0 {
-            return SharedVector::try_with_allocator(0, self.allocator.clone()).unwrap();
+            return SharedVector::try_with_capacity_in(0, self.allocator.clone()).unwrap();
         }
         unsafe {
             let header = self.write_header::<DefaultRefCount>();
@@ -208,7 +208,7 @@ impl<T, A: Allocator + Clone> UniqueVector<T, A> {
     #[inline]
     pub fn into_shared_atomic(self) -> AtomicSharedVector<T, A> where A: Allocator + Clone {
         if self.cap == 0 {
-            return AtomicSharedVector::try_with_allocator(0, self.allocator.clone()).unwrap();
+            return AtomicSharedVector::try_with_capacity_in(0, self.allocator.clone()).unwrap();
         }
         unsafe {
             let header = self.write_header::<AtomicRefCount>();
@@ -369,7 +369,7 @@ impl<T, A: Allocator + Clone> UniqueVector<T, A> {
         T: Clone,
         A: Clone,
     {
-        let mut clone = Self::try_with_allocator(cap.max(self.len()), self.allocator.clone()).unwrap();
+        let mut clone = Self::try_with_capacity_in(cap.max(self.len()), self.allocator.clone()).unwrap();
         let len = self.len;
 
         unsafe {
@@ -401,7 +401,7 @@ impl<T, A: Allocator + Clone> UniqueVector<T, A> {
     #[cold]
     fn try_realloc_with_capacity(&mut self, new_cap: usize) -> Result<(), AllocError> where A: Clone {
         if self.cap == 0 {
-            let dst_buffer = Self::try_with_allocator(new_cap, self.allocator.clone())?;
+            let dst_buffer = Self::try_with_capacity_in(new_cap, self.allocator.clone())?;
             *self = dst_buffer;
 
             return Ok(())
@@ -490,7 +490,7 @@ impl<T, A: Allocator + Clone> UniqueVector<T, A> {
     }
 }
 
-impl<T, A: Allocator + Clone> Drop for UniqueVector<T, A> {
+impl<T, A: Allocator + Clone> Drop for Vector<T, A> {
     fn drop(&mut self) {
         if self.cap == 0 {
             return;
@@ -505,43 +505,43 @@ impl<T, A: Allocator + Clone> Drop for UniqueVector<T, A> {
     }
 }
 
-impl<T: Clone, A: Allocator + Clone> Clone for UniqueVector<T, A> {
+impl<T: Clone, A: Allocator + Clone> Clone for Vector<T, A> {
     fn clone(&self) -> Self {
         self.clone_buffer()
     }
 }
 
-impl<T: PartialEq<T>, A: Allocator + Clone> PartialEq<UniqueVector<T, A>> for UniqueVector<T, A> {
+impl<T: PartialEq<T>, A: Allocator + Clone> PartialEq<Vector<T, A>> for Vector<T, A> {
     fn eq(&self, other: &Self) -> bool {
         self.as_slice() == other.as_slice()
     }
 }
 
-impl<T: PartialEq<T>, A: Allocator + Clone> PartialEq<&[T]> for UniqueVector<T, A> {
+impl<T: PartialEq<T>, A: Allocator + Clone> PartialEq<&[T]> for Vector<T, A> {
     fn eq(&self, other: &&[T]) -> bool {
         self.as_slice() == *other
     }
 }
 
-impl<T, A: Allocator + Clone> AsRef<[T]> for UniqueVector<T, A> {
+impl<T, A: Allocator + Clone> AsRef<[T]> for Vector<T, A> {
     fn as_ref(&self) -> &[T] {
         self.as_slice()
     }
 }
 
-impl<T, A: Allocator + Clone> AsMut<[T]> for UniqueVector<T, A> {
+impl<T, A: Allocator + Clone> AsMut<[T]> for Vector<T, A> {
     fn as_mut(&mut self) -> &mut [T] {
         self.as_mut_slice()
     }
 }
 
-impl<T> Default for UniqueVector<T, Global> {
+impl<T> Default for Vector<T, Global> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<'a, T, A: Allocator + Clone> IntoIterator for &'a UniqueVector<T, A> {
+impl<'a, T, A: Allocator + Clone> IntoIterator for &'a Vector<T, A> {
     type Item = &'a T;
     type IntoIter = core::slice::Iter<'a, T>;
     fn into_iter(self) -> core::slice::Iter<'a, T> {
@@ -549,7 +549,7 @@ impl<'a, T, A: Allocator + Clone> IntoIterator for &'a UniqueVector<T, A> {
     }
 }
 
-impl<'a, T, A: Allocator + Clone> IntoIterator for &'a mut UniqueVector<T, A> {
+impl<'a, T, A: Allocator + Clone> IntoIterator for &'a mut Vector<T, A> {
     type Item = &'a mut T;
     type IntoIter = core::slice::IterMut<'a, T>;
     fn into_iter(self) -> core::slice::IterMut<'a, T> {
@@ -557,7 +557,7 @@ impl<'a, T, A: Allocator + Clone> IntoIterator for &'a mut UniqueVector<T, A> {
     }
 }
 
-impl<T, A: Allocator + Clone, I> Index<I> for UniqueVector<T, A>
+impl<T, A: Allocator + Clone, I> Index<I> for Vector<T, A>
 where
     I: core::slice::SliceIndex<[T]>,
 {
@@ -567,7 +567,7 @@ where
     }
 }
 
-impl<T, A: Allocator + Clone, I> IndexMut<I> for UniqueVector<T, A>
+impl<T, A: Allocator + Clone, I> IndexMut<I> for Vector<T, A>
 where
     I: core::slice::SliceIndex<[T]>,
 {
@@ -576,20 +576,20 @@ where
     }
 }
 
-impl<T, A: Allocator + Clone> Deref for UniqueVector<T, A> {
+impl<T, A: Allocator + Clone> Deref for Vector<T, A> {
     type Target = [T];
     fn deref(&self) -> &[T] {
         self.as_slice()
     }
 }
 
-impl<T, A: Allocator + Clone> DerefMut for UniqueVector<T, A> {
+impl<T, A: Allocator + Clone> DerefMut for Vector<T, A> {
     fn deref_mut(&mut self) -> &mut [T] {
         self.as_mut_slice()
     }
 }
 
-impl<T: Debug, A: Allocator + Clone> Debug for UniqueVector<T, A> {
+impl<T: Debug, A: Allocator + Clone> Debug for Vector<T, A> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> Result<(), core::fmt::Error> {
         self.as_slice().fmt(f)
     }
@@ -602,7 +602,7 @@ fn bump_alloc() {
     let allocator = BlinkAlloc::new();
 
     {
-        let mut v1: UniqueVector<u32, &BlinkAlloc> = UniqueVector::try_with_allocator(4, &allocator).unwrap();
+        let mut v1: Vector<u32, &BlinkAlloc> = Vector::try_with_capacity_in(4, &allocator).unwrap();
         v1.push(0);
         v1.push(1);
         v1.push(2);
@@ -610,7 +610,7 @@ fn bump_alloc() {
         assert_eq!(v1.as_slice(), &[0, 1, 2]);
      
         // let mut v2 = crate::vector!(@ &allocator [10, 11]);
-        let mut v2 = crate::vector!(using &allocator => [10, 11]);
+        let mut v2 = crate::vector!([10, 11] in &allocator);
         assert_eq!(v2.capacity(), 2);
     
         assert_eq!(v2.as_slice(), &[10, 11]);
@@ -639,7 +639,7 @@ fn basic_unique() {
         Box::new(val)
     }
 
-    let mut a = UniqueVector::with_capacity(256);
+    let mut a = Vector::with_capacity(256);
 
     a.push(num(0));
     a.push(num(1));
@@ -653,7 +653,7 @@ fn basic_unique() {
 
     assert!(a.is_unique());
 
-    let b = UniqueVector::from_slice(&[num(0), num(1), num(2), num(3), num(4)]);
+    let b = Vector::from_slice(&[num(0), num(1), num(2), num(3), num(4)]);
 
     assert_eq!(b.as_slice(), &[num(0), num(1), num(2), num(3), num(4)]);
 
@@ -672,7 +672,7 @@ fn basic_unique() {
     let _ = c.clone_buffer();
     let _ = b.clone_buffer();
 
-    let mut d = UniqueVector::with_capacity(64);
+    let mut d = Vector::with_capacity(64);
     d.push_slice(&[num(0), num(1), num(2)]);
     d.push_slice(&[]);
     d.push_slice(&[num(3), num(4)]);

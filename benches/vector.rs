@@ -1,5 +1,5 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
-use shared_vector::{AtomicSharedVector, SharedVector, UniqueVector};
+use shared_vector::{AtomicSharedVector, SharedVector, Vector};
 
 criterion_group!(vector, vector_push);
 criterion_main!(vector);
@@ -21,7 +21,7 @@ fn push_atomic(n: u32, initial_cap: usize) {
 }
 
 fn push_unique(n: u32, initial_cap: usize) {
-    let mut v = UniqueVector::with_capacity(initial_cap);
+    let mut v = Vector::with_capacity(initial_cap);
     for i in 0..n {
         v.push(i);
     }
