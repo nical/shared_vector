@@ -23,10 +23,10 @@ use crate::{grow_amortized, DefaultRefCount};
 /// # Internal representation
 ///
 /// `Vector` stores its length and capacity inline and points to the first element of the
-/// allocated buffer. Room for a 16 bytes header is left before the first element so that the
+/// allocated buffer. Room for a 16 bytes header is left uninitialized before the first element so that the
 /// vector can be converted into a `SharedVector` or `AtomicSharedVector` without reallocating
 /// the storage.
-pub struct Vector<T, A: Allocator + Clone = Global> {
+pub struct Vector<T, A: Allocator = Global> {
     pub(crate) data: NonNull<T>,
     pub(crate) len: BufferSize,
     pub(crate) cap: BufferSize,
@@ -57,20 +57,14 @@ impl<T> Vector<T, Global> {
     ///
     /// Does not allocate memory if `cap` is zero.
     pub fn try_with_capacity(cap: usize) -> Result<Vector<T, Global>, AllocError> {
-        let inner: HeaderBuffer<T, DefaultRefCount, Global> = HeaderBuffer::try_with_capacity(cap, Global)?;
-        let cap = inner.capacity();
-        let data = NonNull::new(inner.data_ptr()).unwrap();
-
-        mem::forget(inner);
-
-        Ok(Vector { data, len: 0, cap, allocator: Global })
+        Vector::try_with_capacity_in(cap, Global)
     }
 
     pub fn from_slice(data: &[T]) -> Self
     where
         T: Clone,
     {
-        let mut v = Self::new();
+        let mut v = Self::with_capacity(data.len());
         v.push_slice(data);
 
         v
@@ -101,7 +95,7 @@ impl<T> Vector<T, Global> {
     }
 }
 
-impl<T, A: Allocator + Clone> Vector<T, A> {
+impl<T, A: Allocator> Vector<T, A> {
     #[inline]
     /// Returns `true` if the vector contains no elements.
     pub fn is_empty(&self) -> bool {
@@ -149,11 +143,17 @@ impl<T, A: Allocator + Clone> Vector<T, A> {
         }
     }
 
-    unsafe fn write_header<R>(&self) -> NonNull<Header<R, A>>
+    unsafe fn base_ptr(&self) -> NonNull<u8> {
+        debug_assert!(self.cap > 0);
+        println!(" base_ptr() self data = {:?}", self.data);
+        raw::header_from_data_ptr::<Header<DefaultRefCount, A>, T>(self.data).cast()
+    }
+
+    unsafe fn into_header_buffer<R>(mut self) -> HeaderBuffer<T, R, A>
     where
         R: RefCount,
-        A: Clone, // TODO
     {
+
         debug_assert!(self.cap != 0);
         unsafe {
             let mut header = raw::header_from_data_ptr(self.data);
@@ -161,27 +161,36 @@ impl<T, A: Allocator + Clone> Vector<T, A> {
             *header.as_mut() = raw::Header {
                 vec: VecHeader { len: self.len, cap: self.cap },
                 ref_count: R::new(1),
-                allocator: self.allocator.clone(),
+                allocator: ptr::read(&mut self.allocator),
             };
 
-            raw::header_from_data_ptr(self.data)
+            mem::forget(self);
+
+            HeaderBuffer::from_raw(header)
         }
     }
 }
 
-impl<T, A: Allocator + Clone> Vector<T, A> {
-    // TODO: remove Clone bound on the allocator.
+// TODO: remove Clone bound on the allocator.
+impl<T, A: Allocator> Vector<T, A> {
     /// Creates an empty pre-allocated vector with a given storage capacity.
     ///
     /// Does not allocate memory if `cap` is zero.
-    pub fn try_with_capacity_in(cap: usize, allocator: A) -> Result<Vector<T, A>, AllocError> where A: Clone {
-        let inner: HeaderBuffer<T, DefaultRefCount, A> = HeaderBuffer::try_with_capacity(cap, allocator.clone())?;
-        let cap = inner.capacity();
-        let data = NonNull::new(inner.data_ptr()).unwrap();
+    pub fn try_with_capacity_in(cap: usize, allocator: A) -> Result<Vector<T, A>, AllocError> {
+        if cap == 0 {
+            return Ok(Vector {
+                data: NonNull::dangling(),
+                len: 0,
+                cap: 0,
+                allocator
+            });
+        }
 
-        mem::forget(inner);
-
-        Ok(Vector { data, len: 0, cap, allocator })
+        unsafe {
+            let (base_ptr, cap) = raw::allocate_header_buffer::<T, A>(cap, &allocator)?;
+            let data = NonNull::new_unchecked(raw::data_ptr::<raw::Header<DefaultRefCount, A>, T>(base_ptr.cast()));
+            Ok(Vector { data, len: 0, cap: cap as BufferSize, allocator })
+        }
     }
 
     /// Make this vector immutable.
@@ -194,9 +203,7 @@ impl<T, A: Allocator + Clone> Vector<T, A> {
             return SharedVector::try_with_capacity_in(0, self.allocator.clone()).unwrap();
         }
         unsafe {
-            let header = self.write_header::<DefaultRefCount>();
-            let inner: HeaderBuffer<T, DefaultRefCount, A> = HeaderBuffer::from_raw(header);
-            mem::forget(self);
+            let inner = self.into_header_buffer::<DefaultRefCount>();
             SharedVector { inner }
         }
     }
@@ -211,15 +218,13 @@ impl<T, A: Allocator + Clone> Vector<T, A> {
             return AtomicSharedVector::try_with_capacity_in(0, self.allocator.clone()).unwrap();
         }
         unsafe {
-            let header = self.write_header::<AtomicRefCount>();
-            let inner: HeaderBuffer<T, AtomicRefCount, A> = HeaderBuffer::from_raw(header);
-            mem::forget(self);
+            let inner = self.into_header_buffer::<AtomicRefCount>();
             AtomicSharedVector { inner }
         }
     }
 
     #[inline]
-    pub fn push(&mut self, val: T) where A: Clone {
+    pub fn push(&mut self, val: T) {
         let len = self.len;
         let cap = self.cap;
         if cap == len {
@@ -298,7 +303,6 @@ impl<T, A: Allocator + Clone> Vector<T, A> {
     pub fn push_slice(&mut self, data: &[T])
     where
         T: Clone,
-        A: Clone,
     {
         self.extend(data.iter().cloned())
     }
@@ -320,7 +324,7 @@ impl<T, A: Allocator + Clone> Vector<T, A> {
         }
     }
 
-    pub fn extend(&mut self, data: impl IntoIterator<Item = T>) where A: Clone {
+    pub fn extend(&mut self, data: impl IntoIterator<Item = T>) {
         let mut iter = data.into_iter();
         let (min, max) = iter.size_hint();
         self.reserve(max.unwrap_or(min));
@@ -389,7 +393,7 @@ impl<T, A: Allocator + Clone> Vector<T, A> {
 
     // Note: Marking this #[inline(never)] is a pretty large regression in the push benchmark.
     #[cold]
-    fn try_realloc_additional(&mut self, additional: usize) -> Result<(), AllocError> where A: Clone {
+    fn try_realloc_additional(&mut self, additional: usize) -> Result<(), AllocError> {
         let new_cap = grow_amortized(self.len(), additional);
         if new_cap < self.len() {
             return Err(AllocError);
@@ -399,23 +403,23 @@ impl<T, A: Allocator + Clone> Vector<T, A> {
     }
 
     #[cold]
-    fn try_realloc_with_capacity(&mut self, new_cap: usize) -> Result<(), AllocError> where A: Clone {
-        if self.cap == 0 {
-            let dst_buffer = Self::try_with_capacity_in(new_cap, self.allocator.clone())?;
-            *self = dst_buffer;
-
-            return Ok(())
-        }
+    fn try_realloc_with_capacity(&mut self, new_cap: usize) -> Result<(), AllocError> {
+        type R = DefaultRefCount;
 
         unsafe {
-            type R = DefaultRefCount;
-            let old_cap = self.capacity();
-            let old_ptr = self.write_header::<DefaultRefCount>().cast();
-            let old_layout = buffer_layout::<Header<R, A>, T>(old_cap).unwrap();
             let new_layout = buffer_layout::<Header<R, A>, T>(new_cap).unwrap();
-            let new_alloc = self.allocator.grow(old_ptr, old_layout, new_layout)?;
-            let new_data_ptr = crate::raw::data_ptr::<Header<R, A>, T>(new_alloc.cast());
 
+            let new_alloc = if self.cap == 0 {
+                self.allocator.allocate(new_layout)?
+            } else {
+                let old_cap = self.capacity();
+                let old_ptr = self.base_ptr();
+                let old_layout = buffer_layout::<Header<R, A>, T>(old_cap).unwrap();
+                let new_layout = buffer_layout::<Header<R, A>, T>(new_cap).unwrap();
+                self.allocator.grow(old_ptr, old_layout, new_layout)?
+            };
+
+            let new_data_ptr = crate::raw::data_ptr::<Header<R, A>, T>(new_alloc.cast());    
             self.data = NonNull::new_unchecked(new_data_ptr);
             self.cap = new_cap as u32;
         }
@@ -475,7 +479,7 @@ impl<T, A: Allocator + Clone> Vector<T, A> {
     ///
     /// The capacity will remain at least as large as both the length and the supplied value.
     /// If the current capacity is less than the lower limit, this is a no-op.
-    pub fn shrink_to(&mut self, min_capacity: usize) where T: Clone, A: Clone {
+    pub fn shrink_to(&mut self, min_capacity: usize) where T: Clone {
         let min_capacity = min_capacity.max(self.len());
         if self.capacity() <= min_capacity {
             return;
@@ -490,7 +494,7 @@ impl<T, A: Allocator + Clone> Vector<T, A> {
     }
 }
 
-impl<T, A: Allocator + Clone> Drop for Vector<T, A> {
+impl<T, A: Allocator> Drop for Vector<T, A> {
     fn drop(&mut self) {
         if self.cap == 0 {
             return;
@@ -499,8 +503,9 @@ impl<T, A: Allocator + Clone> Drop for Vector<T, A> {
         self.clear();
 
         unsafe {
-            let ptr = self.write_header::<DefaultRefCount>();
-            raw::dealloc::<T, DefaultRefCount, A>(ptr, self.cap);
+            let layout = buffer_layout::<Header<DefaultRefCount, A>, T>(self.capacity()).unwrap();
+            let ptr = self.base_ptr();
+            self.allocator.deallocate(ptr, layout);
         }
     }
 }
