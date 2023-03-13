@@ -137,38 +137,25 @@ impl<T, R: RefCount, A: Allocator> HeaderBuffer<T, R, A> {
     }
 
     #[inline(never)]
-    pub fn try_with_capacity(mut cap: usize, allocator: A) -> Result<Self, AllocError>
+    pub fn try_with_capacity(cap: usize, allocator: A) -> Result<Self, AllocError>
     where
         A: Allocator,
         R: RefCount,
     {
-        if cap == 0 {
-            cap = 16;  
-        }
-
         unsafe {
-            if cap > BufferSize::MAX as usize {
-                return Err(capacity_error());
-            }
-
-            let layout = buffer_layout::<Header<R, A>, T>(cap)?;
-            let allocation = allocator.allocate(layout)?;
-            // TODO: allocation could provide more capcity than what was requrested.
-            let alloc: NonNull<Header<R, A>> = allocation.cast();
-
-            let header = Header {
-                vec: VecHeader { cap: cap as BufferSize, len: 0 },
-                ref_count: R::new(1),
-                allocator,
-            };
+            let (ptr, cap) = allocate_header_buffer::<T, A>(cap, &allocator)?;
 
             ptr::write(
-                alloc.as_ptr(),
-                header,
+                ptr.cast().as_ptr(),
+                Header {
+                    vec: VecHeader { cap: cap as BufferSize, len: 0 },
+                    ref_count: R::new(1),
+                    allocator,
+                },
             );
 
             Ok(HeaderBuffer {
-                header: alloc,
+                header: ptr.cast(),
                 _marker: PhantomData,
             })
         }
@@ -484,6 +471,28 @@ impl<T, R: RefCount, A: Allocator> HeaderBuffer<T, R, A> {
             }
         }
     }
+}
+
+#[inline(never)]
+pub fn allocate_header_buffer<T, A>(mut cap: usize, allocator: &A) -> Result<(NonNull<u8>, usize), AllocError>
+where
+    A: Allocator,
+{
+    if cap == 0 {
+        cap = 16;  
+    }
+
+    if cap > BufferSize::MAX as usize {
+        return Err(capacity_error());
+    }
+
+    let layout = buffer_layout::<Header<DefaultRefCount, A>, T>(cap)?;
+    let allocation = allocator.allocate(layout)?;
+    let items_size = allocation.len() - header_size::<Header<DefaultRefCount, A>, T>();
+    let size_of = mem::size_of::<T>();
+    let real_capacity = if size_of == 0 { cap } else { items_size / size_of };
+
+    Ok((allocation.cast(), real_capacity))
 }
 
 pub unsafe fn header_from_data_ptr<H, T>(data_ptr: NonNull<T>) -> NonNull<H> {
