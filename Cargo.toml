@@ -25,5 +25,5 @@ allocator-api2 = "0.2.4"
 
 [features]
 default = ["std"]
-nightly = ["allocator-api2/nightly"]
+nightly = ["allocator-api2/nightly", "blink-alloc/nightly"]
 std = ["allocator-api2/std"]

@@ -1,3 +1,4 @@
+#![cfg_attr(feature = "nightly", feature(allocator_api))]
 #![doc = include_str!("../README.md")]
 
 mod raw;
