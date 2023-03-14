@@ -7,48 +7,54 @@ on:
     branches: [ main ]
 
 jobs:
-  tests:
+  stable:
     env:
         RUST_BACKTRACE: 1
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        rust:
-          - stable
-          - nightly
-
     steps:
       - uses: actions/checkout@v2
-
       - uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: ${{ matrix.rust }}
+          toolchain: stable
           override: true
       - uses: Swatinem/rust-cache@v1
-
       - name: Test
         uses: actions-rs/cargo@v1
         with:
           command: test
-          args: --all --verbose --all-features
+          args: --all --verbose
+
+  nightly:
+    env:
+        RUST_BACKTRACE: 1
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: nightly
+          override: true
+      - uses: Swatinem/rust-cache@v1
+      - name: Test
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: --all --verbose --features nightly
 
   miri:
     env:
         RUST_BACKTRACE: 1
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v2
-
       - uses: actions-rs/toolchain@v1
         with:
           profile: minimal
           toolchain: nightly
           components: miri
           override: true
-
       - uses: Swatinem/rust-cache@v1
-
       - name: Test
         run: cargo +nightly miri test

@@ -29,6 +29,9 @@ fuzz_target!(|cmds: Vec<Cmd>| {
             Cmd::Push { idx, val } => {
                 vectors[slot(idx)].push(Box::new(val));
             }
+            Cmd::PushWithinCapacity { idx, val } => {
+                let _ = vectors[slot(idx)].push_within_capacity(Box::new(val));
+            }
             Cmd::Pop { idx } => {
                 vectors[slot(idx)].pop();
             }
@@ -47,9 +50,9 @@ fuzz_target!(|cmds: Vec<Cmd>| {
                 for elt in vectors[slot(idx)].iter_mut() { *elt = Box::new(1337); };
             }
             Cmd::EnsureUnique { .. } => {}
-            Cmd::PushVector { src_idx, dst_idx } => {
-                let v = std::mem::replace(&mut vectors[slot(src_idx)], UniqueVector::new());
-                vectors[slot(dst_idx)].push_vector(v);
+            Cmd::Append { src_idx, dst_idx } => {
+                let mut v = std::mem::replace(&mut vectors[slot(src_idx)], UniqueVector::new());
+                vectors[slot(dst_idx)].append(&mut v);
             }
             Cmd::WithCapacity { idx, cap } => {
                 vectors[slot(idx)] = UniqueVector::with_capacity(cap % 1024);
@@ -78,6 +81,26 @@ fuzz_target!(|cmds: Vec<Cmd>| {
             Cmd::Convert { idx } => {
                 let a = std::mem::replace(&mut vectors[slot(idx)], UniqueVector::new());
                 vectors[slot(idx)] = a.into_shared().into_unique();
+            }
+            Cmd::Swap { idx, offsets } => {
+                let vec = &mut vectors[slot(idx)];
+                let len = vec.len();
+                if !vec.is_empty() {
+                    vec.swap(offsets.0 % len, offsets.1 % len)
+                }
+            }
+            Cmd::SwapRemove { idx, offset } => {
+                let vec = &mut vectors[slot(idx)];
+                if vec.is_empty() {
+                    return;
+                }
+                vec.swap_remove(offset % vec.len());
+            }
+            Cmd::ShrinkTo { idx, cap } => {
+                vectors[slot(idx)].shrink_to(cap);
+            }
+            Cmd::ShrinkToFit { idx } => {
+                vectors[slot(idx)].shrink_to_fit();
             }
         }
     }
