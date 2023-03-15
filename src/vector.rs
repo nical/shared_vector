@@ -1,10 +1,12 @@
-use core::{ptr, mem};
-use core::ops::{Index, IndexMut, Deref, DerefMut};
-use core::ptr::NonNull;
 use core::fmt::Debug;
+use core::ops::{Deref, DerefMut, Index, IndexMut};
+use core::ptr::NonNull;
+use core::{mem, ptr};
 
-use crate::alloc::{Allocator, Global, AllocError};
-use crate::raw::{self, BufferSize, HeaderBuffer, VecHeader, RefCount, AtomicRefCount, Header, buffer_layout};
+use crate::alloc::{AllocError, Allocator, Global};
+use crate::raw::{
+    self, buffer_layout, AtomicRefCount, BufferSize, Header, HeaderBuffer, RefCount, VecHeader,
+};
 use crate::shared::{AtomicSharedVector, SharedVector};
 use crate::{grow_amortized, DefaultRefCount};
 
@@ -42,7 +44,7 @@ impl<T> Vector<T, Global> {
             data: NonNull::dangling(),
             len: 0,
             cap: 0,
-            allocator: Global
+            allocator: Global,
         }
     }
 
@@ -87,11 +89,6 @@ impl<T> Vector<T, Global> {
         v.push(elem);
 
         v
-    }
-
-    // TODO: make work with any allocator?
-    pub fn take(&mut self) -> Self {
-        mem::take(self)
     }
 }
 
@@ -153,13 +150,15 @@ impl<T, A: Allocator> Vector<T, A> {
     where
         R: RefCount,
     {
-
         debug_assert!(self.cap != 0);
         unsafe {
             let mut header = raw::header_from_data_ptr(self.data);
 
             *header.as_mut() = raw::Header {
-                vec: VecHeader { len: self.len, cap: self.cap },
+                vec: VecHeader {
+                    len: self.len,
+                    cap: self.cap,
+                },
                 ref_count: R::new(1),
                 allocator: ptr::read(&mut self.allocator),
             };
@@ -169,10 +168,7 @@ impl<T, A: Allocator> Vector<T, A> {
             HeaderBuffer::from_raw(header)
         }
     }
-}
 
-// TODO: remove Clone bound on the allocator.
-impl<T, A: Allocator> Vector<T, A> {
     /// Creates an empty pre-allocated vector with a given storage capacity.
     ///
     /// Does not allocate memory if `cap` is zero.
@@ -182,14 +178,21 @@ impl<T, A: Allocator> Vector<T, A> {
                 data: NonNull::dangling(),
                 len: 0,
                 cap: 0,
-                allocator
+                allocator,
             });
         }
 
         unsafe {
             let (base_ptr, cap) = raw::allocate_header_buffer::<T, A>(cap, &allocator)?;
-            let data = NonNull::new_unchecked(raw::data_ptr::<raw::Header<DefaultRefCount, A>, T>(base_ptr.cast()));
-            Ok(Vector { data, len: 0, cap: cap as BufferSize, allocator })
+            let data = NonNull::new_unchecked(raw::data_ptr::<raw::Header<DefaultRefCount, A>, T>(
+                base_ptr.cast(),
+            ));
+            Ok(Vector {
+                data,
+                len: 0,
+                cap: cap as BufferSize,
+                allocator,
+            })
         }
     }
 
@@ -198,7 +201,10 @@ impl<T, A: Allocator> Vector<T, A> {
     /// This operation is cheap, the underlying storage does not not need
     /// to be reallocated.
     #[inline]
-    pub fn into_shared(self) -> SharedVector<T, A> where A: Allocator + Clone {
+    pub fn into_shared(self) -> SharedVector<T, A>
+    where
+        A: Allocator + Clone,
+    {
         if self.cap == 0 {
             return SharedVector::try_with_capacity_in(0, self.allocator.clone()).unwrap();
         }
@@ -213,7 +219,10 @@ impl<T, A: Allocator> Vector<T, A> {
     /// This operation is cheap, the underlying storage does not not need
     /// to be reallocated.
     #[inline]
-    pub fn into_shared_atomic(self) -> AtomicSharedVector<T, A> where A: Allocator + Clone {
+    pub fn into_shared_atomic(self) -> AtomicSharedVector<T, A>
+    where
+        A: Allocator + Clone,
+    {
         if self.cap == 0 {
             return AtomicSharedVector::try_with_capacity_in(0, self.allocator.clone()).unwrap();
         }
@@ -267,9 +276,7 @@ impl<T, A: Allocator> Vector<T, A> {
 
         self.len -= 1;
 
-        unsafe {
-            Some(ptr::read(self.data_ptr().add(self.len as usize)))
-        }
+        unsafe { Some(ptr::read(self.data_ptr().add(self.len as usize))) }
     }
 
     /// Removes an element from the vector and returns it.
@@ -291,7 +298,7 @@ impl<T, A: Allocator> Vector<T, A> {
             let last_idx = len - 1;
             if idx != last_idx {
                 let last_ptr = self.data_ptr().add(last_idx);
-                ptr::write(ptr, ptr::read(last_ptr));    
+                ptr::write(ptr, ptr::read(last_ptr));
             }
 
             self.len -= 1;
@@ -308,7 +315,10 @@ impl<T, A: Allocator> Vector<T, A> {
     }
 
     /// Moves all the elements of `other` into `self`, leaving `other` empty.
-    pub fn append(&mut self, other: &mut Self) where T: Clone {
+    pub fn append(&mut self, other: &mut Self)
+    where
+        T: Clone,
+    {
         if other.is_empty() {
             return;
         }
@@ -373,7 +383,8 @@ impl<T, A: Allocator> Vector<T, A> {
         T: Clone,
         A: Clone,
     {
-        let mut clone = Self::try_with_capacity_in(cap.max(self.len()), self.allocator.clone()).unwrap();
+        let mut clone =
+            Self::try_with_capacity_in(cap.max(self.len()), self.allocator.clone()).unwrap();
         let len = self.len;
 
         unsafe {
@@ -384,7 +395,7 @@ impl<T, A: Allocator> Vector<T, A> {
                 src = src.add(1);
                 dst = dst.add(1);
             }
-        
+
             clone.len = len;
         }
 
@@ -419,7 +430,7 @@ impl<T, A: Allocator> Vector<T, A> {
                 self.allocator.grow(old_ptr, old_layout, new_layout)?
             };
 
-            let new_data_ptr = crate::raw::data_ptr::<Header<R, A>, T>(new_alloc.cast());    
+            let new_data_ptr = crate::raw::data_ptr::<Header<R, A>, T>(new_alloc.cast());
             self.data = NonNull::new_unchecked(new_data_ptr);
             self.cap = new_cap as u32;
         }
@@ -469,7 +480,7 @@ impl<T, A: Allocator> Vector<T, A> {
     /// be relied upon to be precisely minimal. Prefer `try_reserve` if future insertions are expected.
     pub fn try_reserve_exact(&mut self, additional: usize) -> Result<(), AllocError> {
         if self.remaining_capacity() >= additional {
-            return Ok(())
+            return Ok(());
         }
 
         self.try_realloc_with_capacity(self.len() + additional)
@@ -479,7 +490,10 @@ impl<T, A: Allocator> Vector<T, A> {
     ///
     /// The capacity will remain at least as large as both the length and the supplied value.
     /// If the current capacity is less than the lower limit, this is a no-op.
-    pub fn shrink_to(&mut self, min_capacity: usize) where T: Clone {
+    pub fn shrink_to(&mut self, min_capacity: usize)
+    where
+        T: Clone,
+    {
         let min_capacity = min_capacity.max(self.len());
         if self.capacity() <= min_capacity {
             return;
@@ -489,8 +503,29 @@ impl<T, A: Allocator> Vector<T, A> {
     }
 
     /// Shrinks the capacity of the vector as much as possible.
-    pub fn shrink_to_fit(&mut self) where T: Clone {
+    pub fn shrink_to_fit(&mut self)
+    where
+        T: Clone,
+    {
         self.shrink_to(self.len())
+    }
+
+    pub fn take(&mut self) -> Self
+    where
+        A: Clone,
+    {
+        let other = Vector {
+            data: self.data,
+            len: self.len,
+            cap: self.cap,
+            allocator: self.allocator.clone(),
+        };
+
+        self.data = NonNull::dangling();
+        self.len = 0;
+        self.cap = 0;
+
+        other
     }
 }
 
@@ -613,26 +648,26 @@ fn bump_alloc() {
         v1.push(2);
         assert_eq!(v1.capacity(), 4);
         assert_eq!(v1.as_slice(), &[0, 1, 2]);
-     
+
         // let mut v2 = crate::vector!(@ &allocator [10, 11]);
         let mut v2 = crate::vector!([10, 11] in &allocator);
         assert_eq!(v2.capacity(), 2);
-    
+
         assert_eq!(v2.as_slice(), &[10, 11]);
-    
+
         v1.push(3);
         v1.push(4);
-    
+
         assert_eq!(v1.as_slice(), &[0, 1, 2, 3, 4]);
-    
+
         assert!(v1.capacity() > 4);
-    
+
         v2.push(12);
         v2.push(13);
         v2.push(14);
 
         let v2 = v2.into_shared();
-    
+
         assert_eq!(v1.as_slice(), &[0, 1, 2, 3, 4]);
         assert_eq!(v2.as_slice(), &[10, 11, 12, 13, 14]);
     }
@@ -684,4 +719,3 @@ fn basic_unique() {
 
     assert_eq!(d.as_slice(), &[num(0), num(1), num(2), num(3), num(4)]);
 }
-
