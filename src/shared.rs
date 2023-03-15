@@ -1,12 +1,12 @@
-use core::{ptr, mem};
-use core::ops::{Index, IndexMut, Deref, DerefMut};
-use core::ptr::NonNull;
 use core::fmt::Debug;
+use core::ops::{Deref, DerefMut, Index, IndexMut};
+use core::ptr::NonNull;
+use core::{mem, ptr};
 
-use crate::unique::Vector;
+use crate::alloc::{AllocError, Allocator, Global};
 use crate::raw::{BufferSize, HeaderBuffer};
-use crate::{RefCount, AtomicRefCount, DefaultRefCount, grow_amortized};
-use crate::alloc::{Allocator, Global, AllocError};
+use crate::vector::Vector;
+use crate::{grow_amortized, AtomicRefCount, DefaultRefCount, RefCount};
 
 /// A heap allocated, atomically reference counted, immutable contiguous buffer containing elements of type `T`.
 ///
@@ -125,7 +125,11 @@ impl<T, R: RefCount, A: Allocator> RefCountedVector<T, R, A> {
     /// Like other mutable methods, this will clone the vector's storage
     /// if it is not unique to ensure safe mutations.
     #[inline]
-    pub fn as_mut_slice(&mut self) -> &mut[T] where T: Clone, A: Clone {
+    pub fn as_mut_slice(&mut self) -> &mut [T]
+    where
+        T: Clone,
+        A: Clone,
+    {
         self.ensure_unique();
         self.inner.as_mut_slice()
     }
@@ -142,14 +146,22 @@ impl<T, R: RefCount, A: Allocator> RefCountedVector<T, R, A> {
     }
 
     /// Allocates a duplicate of this buffer (infallible).
-    pub fn copy_buffer(&self) -> Self where T: Copy, A: Clone {
+    pub fn copy_buffer(&self) -> Self
+    where
+        T: Copy,
+        A: Clone,
+    {
         RefCountedVector {
             inner: self.inner.try_copy_buffer(None).unwrap(),
         }
     }
 
     /// Tries to allocate a duplicate of this buffer.
-    pub fn try_copy_buffer(&self) -> Result<Self, AllocError> where T: Copy, A: Clone {
+    pub fn try_copy_buffer(&self) -> Result<Self, AllocError>
+    where
+        T: Copy,
+        A: Clone,
+    {
         Ok(RefCountedVector {
             inner: self.inner.try_copy_buffer(None)?,
         })
@@ -181,7 +193,12 @@ impl<T, R: RefCount, A: Allocator> RefCountedVector<T, R, A> {
 
             mem::forget(self);
 
-            Vector { data, len, cap, allocator }
+            Vector {
+                data,
+                len,
+                cap,
+                allocator,
+            }
         }
     }
 
@@ -214,7 +231,11 @@ impl<T, R: RefCount, A: Allocator> RefCountedVector<T, R, A> {
     ///
     /// Panics if index is out of bounds.
     #[inline]
-    pub fn swap_remove(&mut self, idx: usize) -> T where T: Clone, A: Clone {
+    pub fn swap_remove(&mut self, idx: usize) -> T
+    where
+        T: Clone,
+        A: Clone,
+    {
         self.ensure_unique();
 
         let len = self.len();
@@ -227,7 +248,7 @@ impl<T, R: RefCount, A: Allocator> RefCountedVector<T, R, A> {
             let last_idx = len - 1;
             if idx != last_idx {
                 let last_ptr = self.inner.data_ptr().add(last_idx);
-                ptr::write(ptr, ptr::read(last_ptr));    
+                ptr::write(ptr, ptr::read(last_ptr));
             }
 
             self.inner.set_len(last_idx as BufferSize);
@@ -242,7 +263,11 @@ impl<T, R: RefCount, A: Allocator> RefCountedVector<T, R, A> {
     /// Like other mutable operations, this method may reallocate if the vector is not unique.
     /// Hopwever it will not reallocate when there’s insufficient capacity.
     /// The caller should use reserve or try_reserve to ensure that there is enough capacity.
-    pub fn push_within_capacity(&mut self, val: T) -> Result<(), T> where T: Clone, A: Clone {
+    pub fn push_within_capacity(&mut self, val: T) -> Result<(), T>
+    where
+        T: Clone,
+        A: Clone,
+    {
         if self.remaining_capacity() == 0 {
             return Err(val);
         }
@@ -281,13 +306,19 @@ impl<T, R: RefCount, A: Allocator> RefCountedVector<T, R, A> {
 
     // TODO: remove Clone bound on the allocator.
     /// Clears the vector, removing all values.
-    pub fn clear(&mut self) where A: Clone {
+    pub fn clear(&mut self)
+    where
+        A: Clone,
+    {
         if self.is_unique() {
-            unsafe { self.inner.clear(); }
+            unsafe {
+                self.inner.clear();
+            }
             return;
         }
 
-        *self = Self::try_with_capacity_in(self.capacity(), self.inner.allocator().clone()).unwrap();
+        *self =
+            Self::try_with_capacity_in(self.capacity(), self.inner.allocator().clone()).unwrap();
     }
 
     /// Returns true if the two vectors share the same underlying storage.
@@ -330,7 +361,8 @@ impl<T, R: RefCount, A: Allocator> RefCountedVector<T, R, A> {
 
         if !is_unique || !enough_capacity {
             // Hopefully the least common case.
-            self.try_realloc_additional(is_unique, enough_capacity, additional).unwrap();
+            self.try_realloc_additional(is_unique, enough_capacity, additional)
+                .unwrap();
         }
     }
 
@@ -404,23 +436,37 @@ impl<T, R: RefCount, A: Allocator> RefCountedVector<T, R, A> {
     ///
     /// The capacity will remain at least as large as both the length and the supplied value.
     /// If the current capacity is less than the lower limit, this is a no-op.
-    pub fn shrink_to(&mut self, min_capacity: usize) where T: Clone, A: Clone {
+    pub fn shrink_to(&mut self, min_capacity: usize)
+    where
+        T: Clone,
+        A: Clone,
+    {
         let min_capacity = min_capacity.max(self.len());
         if self.capacity() <= min_capacity {
             return;
         }
 
         let is_unique = self.is_unique();
-        self.try_realloc_with_capacity(is_unique, min_capacity).unwrap();
+        self.try_realloc_with_capacity(is_unique, min_capacity)
+            .unwrap();
     }
 
     /// Shrinks the capacity of the vector as much as possible.
-    pub fn shrink_to_fit(&mut self) where T: Clone, A: Clone {
+    pub fn shrink_to_fit(&mut self)
+    where
+        T: Clone,
+        A: Clone,
+    {
         self.shrink_to(self.len())
     }
 
     #[cold]
-    fn try_realloc_additional(&mut self, is_unique: bool, enough_capacity: bool, additional: usize) -> Result<(), AllocError>
+    fn try_realloc_additional(
+        &mut self,
+        is_unique: bool,
+        enough_capacity: bool,
+        additional: usize,
+    ) -> Result<(), AllocError>
     where
         T: Clone,
         A: Clone,
@@ -435,7 +481,11 @@ impl<T, R: RefCount, A: Allocator> RefCountedVector<T, R, A> {
     }
 
     #[cold]
-    fn try_realloc_with_capacity(&mut self, is_unique: bool, new_cap: usize) -> Result<(), AllocError>
+    fn try_realloc_with_capacity(
+        &mut self,
+        is_unique: bool,
+        new_cap: usize,
+    ) -> Result<(), AllocError>
     where
         T: Clone,
         A: Clone, // TODO
@@ -447,7 +497,7 @@ impl<T, R: RefCount, A: Allocator> RefCountedVector<T, R, A> {
             // a simple memcpy instead of cloning it.
 
             unsafe {
-                use crate::raw::{Header, buffer_layout};
+                use crate::raw::{buffer_layout, Header};
                 let old_cap = self.capacity();
                 let old_header = self.inner.header;
                 let old_layout = buffer_layout::<Header<R, A>, T>(old_cap).unwrap();
@@ -482,7 +532,11 @@ impl<T, R: RefCount, A: Allocator> RefCountedVector<T, R, A> {
     /// Moves all the elements of `other` into `self`, leaving `other` empty.
     ///
     /// If `other is not unique, the elements are cloned instead of moved.
-    pub fn append(&mut self, other: &mut Self) where T: Clone, A: Clone {
+    pub fn append(&mut self, other: &mut Self)
+    where
+        T: Clone,
+        A: Clone,
+    {
         self.reserve(other.len());
 
         unsafe {
@@ -492,7 +546,9 @@ impl<T, R: RefCount, A: Allocator> RefCountedVector<T, R, A> {
             } else {
                 // Slow path, clone each item.
                 self.inner.try_push_slice(other.as_slice()).unwrap();
-                *other = Self::try_with_capacity_in(other.capacity(), self.inner.allocator().clone()).unwrap();
+                *other =
+                    Self::try_with_capacity_in(other.capacity(), self.inner.allocator().clone())
+                        .unwrap();
             }
         }
     }
@@ -511,7 +567,9 @@ impl<T, R: RefCount, A: Allocator> Clone for RefCountedVector<T, R, A> {
     }
 }
 
-impl<T: PartialEq<T>, R: RefCount, A: Allocator> PartialEq<RefCountedVector<T, R, A>> for RefCountedVector<T, R, A> {
+impl<T: PartialEq<T>, R: RefCount, A: Allocator> PartialEq<RefCountedVector<T, R, A>>
+    for RefCountedVector<T, R, A>
+{
     fn eq(&self, other: &Self) -> bool {
         self.ptr_eq(other) || self.as_slice() == other.as_slice()
     }
@@ -543,7 +601,9 @@ impl<'a, T, R: RefCount, A: Allocator> IntoIterator for &'a RefCountedVector<T, 
     }
 }
 
-impl<'a, T: Clone, R: RefCount, A: Allocator + Clone> IntoIterator for &'a mut RefCountedVector<T, R, A> {
+impl<'a, T: Clone, R: RefCount, A: Allocator + Clone> IntoIterator
+    for &'a mut RefCountedVector<T, R, A>
+{
     type Item = &'a mut T;
     type IntoIter = core::slice::IterMut<'a, T>;
     fn into_iter(self) -> core::slice::IterMut<'a, T> {
@@ -590,7 +650,6 @@ impl<T: Debug, R: RefCount, A: Allocator> Debug for RefCountedVector<T, R, A> {
         self.as_slice().fmt(f)
     }
 }
-
 
 // In order to give us a chance to catch leaks and double-frees, test with values that implement drop.
 #[cfg(test)]

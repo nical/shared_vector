@@ -3,14 +3,14 @@
 
 mod raw;
 mod shared;
-mod unique;
+mod vector;
 
-pub use raw::{BufferSize, RefCount, AtomicRefCount, DefaultRefCount};
-pub use unique::Vector;
-pub use shared::{SharedVector, AtomicSharedVector, RefCountedVector};
+pub use raw::{AtomicRefCount, BufferSize, DefaultRefCount, RefCount};
+pub use shared::{AtomicSharedVector, RefCountedVector, SharedVector};
+pub use vector::Vector;
 
 pub mod alloc {
-    pub use allocator_api2::alloc::{Allocator, Global, AllocError};
+    pub use allocator_api2::alloc::{AllocError, Allocator, Global};
 }
 
 pub(crate) fn grow_amortized(len: usize, additional: usize) -> usize {
@@ -117,7 +117,6 @@ fn vector_macro() {
     assert_eq!(v1.as_slice(), &[0, 1, 2, 3, 4, 5]);
     assert_eq!(v2.as_slice(), &[2, 2, 2, 2]);
     assert_eq!(v3.as_slice(), &[6, 7]);
-
 
     let v1: SharedVector<u32> = rc_vector![0, 1, 2, 3, 4, 5];
     let v2: SharedVector<u32> = rc_vector![3; 5];

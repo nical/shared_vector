@@ -1,11 +1,14 @@
 use core::alloc::Layout;
+use core::cell::UnsafeCell;
 use core::marker::PhantomData;
 use core::mem;
 use core::ptr::{self, NonNull};
-use core::sync::atomic::{AtomicI32, Ordering::{Acquire, Release, Relaxed}};
-use core::cell::UnsafeCell;
+use core::sync::atomic::{
+    AtomicI32,
+    Ordering::{Acquire, Relaxed, Release},
+};
 
-pub use crate::alloc::{Allocator, Global, AllocError};
+pub use crate::alloc::{AllocError, Allocator, Global};
 
 pub type BufferSize = u32;
 
@@ -92,15 +95,21 @@ const fn header_size<Header, T>() -> usize {
 
     // Favor L1 cache line alignment for large structs.
     let min = if mem::size_of::<T>() < 64 { 16 } else { 64 };
-    if size < min { min } else { size }
+    if size < min {
+        min
+    } else {
+        size
+    }
 }
 
 pub fn buffer_layout<Header, T>(n: usize) -> Result<Layout, AllocError> {
-    let size = mem::size_of::<T>()
-        .checked_mul(n)
-        .ok_or(AllocError)?;
+    let size = mem::size_of::<T>().checked_mul(n).ok_or(AllocError)?;
     let align = mem::align_of::<Header>().max(mem::align_of::<T>());
-    let align = if mem::size_of::<T>() < 64 { align } else { align.max(64) };
+    let align = if mem::size_of::<T>() < 64 {
+        align
+    } else {
+        align.max(64)
+    };
     let header_size = header_size::<Header, T>();
 
     Layout::from_size_align(header_size + size, align).map_err(|_| AllocError)
@@ -124,7 +133,6 @@ fn capacity_error() -> AllocError {
     AllocError
 }
 
-
 #[repr(transparent)]
 pub struct HeaderBuffer<T, R: RefCount, A: Allocator> {
     pub header: NonNull<Header<R, A>>,
@@ -133,7 +141,10 @@ pub struct HeaderBuffer<T, R: RefCount, A: Allocator> {
 
 impl<T, R: RefCount, A: Allocator> HeaderBuffer<T, R, A> {
     pub unsafe fn from_raw(ptr: NonNull<Header<R, A>>) -> Self {
-        HeaderBuffer { header: ptr, _marker: PhantomData }
+        HeaderBuffer {
+            header: ptr,
+            _marker: PhantomData,
+        }
     }
 
     #[inline(never)]
@@ -148,7 +159,10 @@ impl<T, R: RefCount, A: Allocator> HeaderBuffer<T, R, A> {
             ptr::write(
                 ptr.cast().as_ptr(),
                 Header {
-                    vec: VecHeader { cap: cap as BufferSize, len: 0 },
+                    vec: VecHeader {
+                        cap: cap as BufferSize,
+                        len: 0,
+                    },
                     ref_count: R::new(1),
                     allocator,
                 },
@@ -197,7 +211,7 @@ impl<T, R: RefCount, A: Allocator> HeaderBuffer<T, R, A> {
 
     #[inline]
     pub fn is_empty(&self) -> bool {
-       self.len() == 0
+        self.len() == 0
     }
 
     #[inline]
@@ -242,11 +256,11 @@ impl<T, R: RefCount, A: Allocator> HeaderBuffer<T, R, A> {
                     src = src.add(1);
                     dst = dst.add(1);
                 }
-            
-                clone.set_len(len);    
+
+                clone.set_len(len);
             }
-        
-            Ok(clone)    
+
+            Ok(clone)
         }
     }
 
@@ -269,36 +283,46 @@ impl<T, R: RefCount, A: Allocator> HeaderBuffer<T, R, A> {
             if len > cap {
                 return Err(capacity_error());
             }
-        
+
             let allocator = header.allocator.clone();
             let mut clone = HeaderBuffer::try_with_capacity(cap as usize, allocator)?;
-        
+
             if len > 0 {
                 core::ptr::copy_nonoverlapping(self.data_ptr(), clone.data_ptr(), len as usize);
                 clone.set_len(len);
             }
-        
-            Ok(clone)    
+
+            Ok(clone)
         }
     }
 
     #[inline]
-    pub fn is_unique(&self) -> bool where R: RefCount {
+    pub fn is_unique(&self) -> bool
+    where
+        R: RefCount,
+    {
         unsafe { self.header.as_ref().ref_count.get() == 1 }
     }
 
     #[inline]
     pub fn as_slice(&self) -> &[T] {
-        unsafe { core::slice::from_raw_parts(self.data_ptr(), self.header.as_ref().vec.len as usize) }
+        unsafe {
+            core::slice::from_raw_parts(self.data_ptr(), self.header.as_ref().vec.len as usize)
+        }
     }
 
     #[inline]
     pub fn as_mut_slice(&mut self) -> &mut [T] {
-        unsafe { core::slice::from_raw_parts_mut(self.data_ptr(), self.header.as_ref().vec.len as usize) }
+        unsafe {
+            core::slice::from_raw_parts_mut(self.data_ptr(), self.header.as_ref().vec.len as usize)
+        }
     }
 
     #[inline]
-    pub fn new_ref(&self) -> Self where R: RefCount {
+    pub fn new_ref(&self) -> Self
+    where
+        R: RefCount,
+    {
         unsafe {
             self.header.as_ref().ref_count.add_ref();
         }
@@ -474,12 +498,15 @@ impl<T, R: RefCount, A: Allocator> HeaderBuffer<T, R, A> {
 }
 
 #[inline(never)]
-pub fn allocate_header_buffer<T, A>(mut cap: usize, allocator: &A) -> Result<(NonNull<u8>, usize), AllocError>
+pub fn allocate_header_buffer<T, A>(
+    mut cap: usize,
+    allocator: &A,
+) -> Result<(NonNull<u8>, usize), AllocError>
 where
     A: Allocator,
 {
     if cap == 0 {
-        cap = 16;  
+        cap = 16;
     }
 
     if cap > BufferSize::MAX as usize {
@@ -490,7 +517,11 @@ where
     let allocation = allocator.allocate(layout)?;
     let items_size = allocation.len() - header_size::<Header<DefaultRefCount, A>, T>();
     let size_of = mem::size_of::<T>();
-    let real_capacity = if size_of == 0 { cap } else { items_size / size_of };
+    let real_capacity = if size_of == 0 {
+        cap
+    } else {
+        items_size / size_of
+    };
 
     Ok((allocation.cast(), real_capacity))
 }
@@ -526,4 +557,3 @@ fn buffer_layout_alignemnt() {
 
     assert_eq!(layout, atomic_layout);
 }
-
