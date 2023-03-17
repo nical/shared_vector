@@ -153,6 +153,7 @@ impl<T, R: RefCount, A: Allocator> HeaderBuffer<T, R, A> {
         A: Allocator,
         R: RefCount,
     {
+        assert_ref_count_layout::<R>();
         unsafe {
             let (ptr, cap) = allocate_header_buffer::<T, A>(cap, &allocator)?;
 
@@ -495,6 +496,11 @@ impl<T, R: RefCount, A: Allocator> HeaderBuffer<T, R, A> {
             }
         }
     }
+}
+
+pub fn assert_ref_count_layout<R>() {
+    assert_eq!(mem::size_of::<R>(), mem::size_of::<i32>());
+    assert_eq!(mem::align_of::<R>(), mem::align_of::<i32>());
 }
 
 #[inline(never)]

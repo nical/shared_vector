@@ -1,18 +1,18 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use shared_vector::UniqueVector;
+use shared_vector::Vector;
 
 mod cmd;
 use cmd::*;
 
 fuzz_target!(|cmds: Vec<Cmd>| {
 
-    let mut vectors: [UniqueVector<Box<u32>>; 4] = [
-        UniqueVector::new(),
-        UniqueVector::new(),
-        UniqueVector::new(),
-        UniqueVector::new(),
+    let mut vectors: [Vector<Box<u32>>; 4] = [
+        Vector::new(),
+        Vector::new(),
+        Vector::new(),
+        Vector::new(),
     ];
 
     for cmd in cmds {
@@ -21,7 +21,7 @@ fuzz_target!(|cmds: Vec<Cmd>| {
                 //vectors[slot(dst_idx)] = vectors[slot(src_idx)].new_ref();
             }
             Cmd::DropVec { idx } => {
-                vectors[slot(idx)] = UniqueVector::new();
+                vectors[slot(idx)] = Vector::new();
             }
             Cmd::Clear { idx } => {
                 vectors[slot(idx)].clear();
@@ -51,14 +51,14 @@ fuzz_target!(|cmds: Vec<Cmd>| {
             }
             Cmd::EnsureUnique { .. } => {}
             Cmd::Append { src_idx, dst_idx } => {
-                let mut v = std::mem::replace(&mut vectors[slot(src_idx)], UniqueVector::new());
+                let mut v = std::mem::replace(&mut vectors[slot(src_idx)], Vector::new());
                 vectors[slot(dst_idx)].append(&mut v);
             }
             Cmd::WithCapacity { idx, cap } => {
-                vectors[slot(idx)] = UniqueVector::with_capacity(cap % 1024);
+                vectors[slot(idx)] = Vector::with_capacity(cap % 1024);
             }
             Cmd::FromSlice { src_idx, dst_idx } => {
-                vectors[slot(dst_idx)] = UniqueVector::from_slice(vectors[slot(src_idx)].as_slice());
+                vectors[slot(dst_idx)] = Vector::from_slice(vectors[slot(src_idx)].as_slice());
             }
             Cmd::AsMutSlice { idx } => {
                 for v in vectors[slot(idx)].as_mut_slice() { *v = Box::new(42); };
@@ -79,7 +79,7 @@ fuzz_target!(|cmds: Vec<Cmd>| {
                 vectors[slot(idx)].reserve(reserve_max(vectors[slot(idx)].len(), val));
             }
             Cmd::Convert { idx } => {
-                let a = std::mem::replace(&mut vectors[slot(idx)], UniqueVector::new());
+                let a = std::mem::replace(&mut vectors[slot(idx)], Vector::new());
                 vectors[slot(idx)] = a.into_shared().into_unique();
             }
             Cmd::Swap { idx, offsets } => {

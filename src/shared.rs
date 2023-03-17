@@ -120,29 +120,34 @@ impl<T, R: RefCount, A: Allocator> RefCountedVector<T, R, A> {
         self.inner.as_slice()
     }
 
-    /// Extracts a mutable slice containing the entire vector.
+    /// Returns true if this is the only existing handle to the buffer.
     ///
-    /// Like other mutable methods, this will clone the vector's storage
-    /// if it is not unique to ensure safe mutations.
+    /// When this function returns true, mutable methods and converting to a `Vector`
+    /// is very fast (does not involve additional memory allocations or copies).
     #[inline]
-    pub fn as_mut_slice(&mut self) -> &mut [T]
-    where
-        T: Clone,
-        A: Clone,
-    {
-        self.ensure_unique();
-        self.inner.as_mut_slice()
+    pub fn is_unique(&self) -> bool {
+        self.inner.is_unique()
     }
 
-    /// Allocates a duplicate of this buffer (infallible).
-    pub fn clone_buffer(&self) -> Self
+    /// Clears the vector, removing all values.
+    pub fn clear(&mut self)
     where
-        T: Clone,
         A: Clone,
     {
-        RefCountedVector {
-            inner: self.inner.try_clone_buffer(None).unwrap(),
+        if self.is_unique() {
+            unsafe {
+                self.inner.clear();
+            }
+            return;
         }
+
+        *self =
+            Self::try_with_capacity_in(self.capacity(), self.inner.allocator().clone()).unwrap();
+    }
+
+    /// Returns true if the two vectors share the same underlying storage.
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        self.inner.ptr_eq(&other.inner)
     }
 
     /// Allocates a duplicate of this buffer (infallible).
@@ -167,22 +172,19 @@ impl<T, R: RefCount, A: Allocator> RefCountedVector<T, R, A> {
         })
     }
 
-    /// Returns true if this is the only existing handle to the buffer.
-    ///
-    /// When this function returns true, mutable methods and converting to a `Vector`
-    /// is very fast (does not involve additional memory allocations or copies).
-    #[inline]
-    pub fn is_unique(&self) -> bool {
-        self.inner.is_unique()
-    }
 
+    #[allow(unused)]
+    pub(crate) fn addr(&self) -> *const u8 {
+        self.inner.header.as_ptr() as *const u8
+    }
+}
+
+/// Mutable methods that can cause the vector to be cloned and therefore require both the items and
+/// the allocator to be cloneable.
+impl<T: Clone, R: RefCount, A: Allocator + Clone> RefCountedVector<T, R, A> {
     /// Converts this RefCountedVector into an immutable one, allocating a new copy if there are other references.
     #[inline]
-    pub fn into_unique(mut self) -> Vector<T, A>
-    where
-        T: Clone,
-        A: Clone,
-    {
+    pub fn into_unique(mut self) -> Vector<T, A> {
         self.ensure_unique();
 
         unsafe {
@@ -202,11 +204,12 @@ impl<T, R: RefCount, A: Allocator> RefCountedVector<T, R, A> {
         }
     }
 
-    pub fn push(&mut self, val: T)
-    where
-        T: Clone,
-        A: Clone,
-    {
+    /// Appends an element to the back of a collection.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the new capacity exceeds `u32::MAX` bytes.
+    pub fn push(&mut self, val: T) {
         self.reserve(1);
         unsafe {
             self.inner.push(val);
@@ -214,11 +217,7 @@ impl<T, R: RefCount, A: Allocator> RefCountedVector<T, R, A> {
     }
 
     /// Removes the last element from the vector and returns it, or `None` if it is empty.
-    pub fn pop(&mut self) -> Option<T>
-    where
-        T: Clone,
-        A: Clone,
-    {
+    pub fn pop(&mut self) -> Option<T> {
         self.ensure_unique();
         unsafe { self.inner.pop() }
     }
@@ -231,11 +230,7 @@ impl<T, R: RefCount, A: Allocator> RefCountedVector<T, R, A> {
     ///
     /// Panics if index is out of bounds.
     #[inline]
-    pub fn swap_remove(&mut self, idx: usize) -> T
-    where
-        T: Clone,
-        A: Clone,
-    {
+    pub fn swap_remove(&mut self, idx: usize) -> T {
         self.ensure_unique();
 
         let len = self.len();
@@ -263,11 +258,7 @@ impl<T, R: RefCount, A: Allocator> RefCountedVector<T, R, A> {
     /// Like other mutable operations, this method may reallocate if the vector is not unique.
     /// Hopwever it will not reallocate when there’s insufficient capacity.
     /// The caller should use reserve or try_reserve to ensure that there is enough capacity.
-    pub fn push_within_capacity(&mut self, val: T) -> Result<(), T>
-    where
-        T: Clone,
-        A: Clone,
-    {
+    pub fn push_within_capacity(&mut self, val: T) -> Result<(), T> {
         if self.remaining_capacity() == 0 {
             return Err(val);
         }
@@ -280,50 +271,22 @@ impl<T, R: RefCount, A: Allocator> RefCountedVector<T, R, A> {
         Ok(())
     }
 
-    pub fn push_slice(&mut self, data: &[T])
-    where
-        T: Clone,
-        A: Clone,
-    {
+    /// Clones and appends the contents of the slice to the back of a collection.
+    pub fn push_slice(&mut self, data: &[T]) {
         self.reserve(data.len());
         unsafe {
             self.inner.try_push_slice(data).unwrap();
         }
     }
 
-    pub fn extend(&mut self, data: impl IntoIterator<Item = T>)
-    where
-        T: Clone,
-        A: Clone,
-    {
+    /// Appends the contents of an iterator to the back of a collection.
+    pub fn extend(&mut self, data: impl IntoIterator<Item = T>) {
         let mut iter = data.into_iter();
         let (min, max) = iter.size_hint();
         self.reserve(max.unwrap_or(min));
         unsafe {
             self.inner.try_extend(&mut iter).unwrap();
         }
-    }
-
-    // TODO: remove Clone bound on the allocator.
-    /// Clears the vector, removing all values.
-    pub fn clear(&mut self)
-    where
-        A: Clone,
-    {
-        if self.is_unique() {
-            unsafe {
-                self.inner.clear();
-            }
-            return;
-        }
-
-        *self =
-            Self::try_with_capacity_in(self.capacity(), self.inner.allocator().clone()).unwrap();
-    }
-
-    /// Returns true if the two vectors share the same underlying storage.
-    pub fn ptr_eq(&self, other: &Self) -> bool {
-        self.inner.ptr_eq(&other.inner)
     }
 
     /// Ensures this shared vector uniquely owns its storage, allocating a new copy
@@ -334,13 +297,34 @@ impl<T, R: RefCount, A: Allocator> RefCountedVector<T, R, A> {
     /// it has a few niche use cases, for example to provoke copies earlier for more
     /// predictable performance or in some unsafe endeavors.
     #[inline]
-    pub fn ensure_unique(&mut self)
+    pub fn ensure_unique(&mut self) {
+        if !self.is_unique() {
+            self.inner = self.inner.try_clone_buffer(None).unwrap();
+        }
+    }
+
+    /// Extracts a mutable slice containing the entire vector.
+    ///
+    /// Like other mutable methods, this will clone the vector's storage
+    /// if it is not unique to ensure safe mutations.
+    #[inline]
+    pub fn as_mut_slice(&mut self) -> &mut [T]
     where
         T: Clone,
         A: Clone,
     {
-        if !self.is_unique() {
-            self.inner = self.inner.try_clone_buffer(None).unwrap();
+        self.ensure_unique();
+        self.inner.as_mut_slice()
+    }
+
+    /// Allocates a duplicate of this buffer (infallible).
+    pub fn clone_buffer(&self) -> Self
+    where
+        T: Clone,
+        A: Clone,
+    {
+        RefCountedVector {
+            inner: self.inner.try_clone_buffer(None).unwrap(),
         }
     }
 
@@ -351,11 +335,7 @@ impl<T, R: RefCount, A: Allocator> RefCountedVector<T, R, A> {
     /// the capacity is not sufficient to accomodate `self.len() + additional` items.
     /// The vector may reserve more space to speculatively avoid frequent reallocations.
     #[inline]
-    pub fn reserve(&mut self, additional: usize)
-    where
-        T: Clone,
-        A: Clone,
-    {
+    pub fn reserve(&mut self, additional: usize) {
         let is_unique = self.is_unique();
         let enough_capacity = self.remaining_capacity() >= additional;
 
@@ -373,11 +353,7 @@ impl<T, R: RefCount, A: Allocator> RefCountedVector<T, R, A> {
     /// if it returns `Ok(())`.
     /// Does nothing if capacity is already sufficient. This method preserves the contents even if an
     /// error occurs.
-    pub fn try_reserve(&mut self, additional: usize) -> Result<(), AllocError>
-    where
-        T: Clone,
-        A: Clone,
-    {
+    pub fn try_reserve(&mut self, additional: usize) -> Result<(), AllocError> {
         let is_unique = self.is_unique();
         let enough_capacity = self.remaining_capacity() >= additional;
 
@@ -399,11 +375,7 @@ impl<T, R: RefCount, A: Allocator> RefCountedVector<T, R, A> {
     ///
     /// Note that the allocator may give the collection more space than it requests. Therefore, capacity can not
     /// be relied upon to be precisely minimal. Prefer `try_reserve` if future insertions are expected.
-    pub fn reserve_exact(&mut self, additional: usize)
-    where
-        T: Clone,
-        A: Clone,
-    {
+    pub fn reserve_exact(&mut self, additional: usize) {
         self.try_reserve_exact(additional).unwrap();
     }
 
@@ -416,11 +388,7 @@ impl<T, R: RefCount, A: Allocator> RefCountedVector<T, R, A> {
     ///
     /// Note that the allocator may give the collection more space than it requests. Therefore, capacity can not
     /// be relied upon to be precisely minimal. Prefer `try_reserve` if future insertions are expected.
-    pub fn try_reserve_exact(&mut self, additional: usize) -> Result<(), AllocError>
-    where
-        T: Clone,
-        A: Clone,
-    {
+    pub fn try_reserve_exact(&mut self, additional: usize) -> Result<(), AllocError> {
         let is_unique = self.is_unique();
         let enough_capacity = self.remaining_capacity() >= additional;
 
@@ -436,11 +404,7 @@ impl<T, R: RefCount, A: Allocator> RefCountedVector<T, R, A> {
     ///
     /// The capacity will remain at least as large as both the length and the supplied value.
     /// If the current capacity is less than the lower limit, this is a no-op.
-    pub fn shrink_to(&mut self, min_capacity: usize)
-    where
-        T: Clone,
-        A: Clone,
-    {
+    pub fn shrink_to(&mut self, min_capacity: usize) {
         let min_capacity = min_capacity.max(self.len());
         if self.capacity() <= min_capacity {
             return;
@@ -452,91 +416,14 @@ impl<T, R: RefCount, A: Allocator> RefCountedVector<T, R, A> {
     }
 
     /// Shrinks the capacity of the vector as much as possible.
-    pub fn shrink_to_fit(&mut self)
-    where
-        T: Clone,
-        A: Clone,
-    {
+    pub fn shrink_to_fit(&mut self) {
         self.shrink_to(self.len())
-    }
-
-    #[cold]
-    fn try_realloc_additional(
-        &mut self,
-        is_unique: bool,
-        enough_capacity: bool,
-        additional: usize,
-    ) -> Result<(), AllocError>
-    where
-        T: Clone,
-        A: Clone,
-    {
-        let new_cap = if enough_capacity {
-            self.capacity()
-        } else {
-            grow_amortized(self.len(), additional)
-        };
-
-        self.try_realloc_with_capacity(is_unique, new_cap)
-    }
-
-    #[cold]
-    fn try_realloc_with_capacity(
-        &mut self,
-        is_unique: bool,
-        new_cap: usize,
-    ) -> Result<(), AllocError>
-    where
-        T: Clone,
-        A: Clone, // TODO
-    {
-        let allocator = self.inner.allocator().clone();
-        if is_unique && self.capacity() > 0 {
-            // The buffer is not large enough, we'll have to create a new one, however we
-            // know that we have the only reference to it so we'll move the data with
-            // a simple memcpy instead of cloning it.
-
-            unsafe {
-                use crate::raw::{buffer_layout, Header};
-                let old_cap = self.capacity();
-                let old_header = self.inner.header;
-                let old_layout = buffer_layout::<Header<R, A>, T>(old_cap).unwrap();
-                let new_layout = buffer_layout::<Header<R, A>, T>(new_cap).unwrap();
-                let new_alloc = allocator.grow(old_header.cast(), old_layout, new_layout)?;
-                self.inner.header = new_alloc.cast();
-                self.inner.header.as_mut().vec.cap = new_cap as BufferSize;
-
-                return Ok(());
-            }
-        }
-
-        // The slowest path, we pay for both the new allocation and the need to clone
-        // each item one by one.
-        self.inner = HeaderBuffer::try_from_slice(self.as_slice(), Some(new_cap), allocator)?;
-
-        Ok(())
-    }
-
-    // TODO: remove this one?
-    /// Returns the concatenation of two vectors.
-    pub fn concatenate(mut self, mut other: Self) -> Self
-    where
-        T: Clone,
-        A: Clone,
-    {
-        self.append(&mut other);
-
-        self
     }
 
     /// Moves all the elements of `other` into `self`, leaving `other` empty.
     ///
     /// If `other is not unique, the elements are cloned instead of moved.
-    pub fn append(&mut self, other: &mut Self)
-    where
-        T: Clone,
-        A: Clone,
-    {
+    pub fn append(&mut self, other: &mut Self) {
         self.reserve(other.len());
 
         unsafe {
@@ -553,11 +440,75 @@ impl<T, R: RefCount, A: Allocator> RefCountedVector<T, R, A> {
         }
     }
 
-    #[allow(unused)]
-    pub(crate) fn addr(&self) -> *const u8 {
-        self.inner.header.as_ptr() as *const u8
+    #[cold]
+    fn try_realloc_additional(
+        &mut self,
+        is_unique: bool,
+        enough_capacity: bool,
+        additional: usize,
+    ) -> Result<(), AllocError> {
+        let new_cap = if enough_capacity {
+            self.capacity()
+        } else {
+            grow_amortized(self.len(), additional)
+        };
+
+        self.try_realloc_with_capacity(is_unique, new_cap)
+    }
+
+    #[cold]
+    fn try_realloc_with_capacity(
+        &mut self,
+        is_unique: bool,
+        new_cap: usize,
+    ) -> Result<(), AllocError> {
+        let allocator = self.inner.allocator().clone();
+        if is_unique && self.capacity() > 0 {
+            // The buffer is not large enough, we'll have to create a new one, however we
+            // know that we have the only reference to it so we'll move the data with
+            // a simple memcpy instead of cloning it.
+
+            unsafe {
+                use crate::raw::{buffer_layout, Header};
+                let old_cap = self.capacity();
+                let old_header = self.inner.header;
+                let old_layout = buffer_layout::<Header<R, A>, T>(old_cap).unwrap();
+                let new_layout = buffer_layout::<Header<R, A>, T>(new_cap).unwrap();
+
+                let new_alloc = if new_layout.size() >= old_layout.size() {
+                    allocator.grow(old_header.cast(), old_layout, new_layout)
+                } else {
+                    allocator.shrink(old_header.cast(), old_layout, new_layout)
+                }?;
+
+                self.inner.header = new_alloc.cast();
+                self.inner.header.as_mut().vec.cap = new_cap as BufferSize;
+
+                return Ok(());
+            }
+        }
+
+        // The slowest path, we pay for both the new allocation and the need to clone
+        // each item one by one.
+        self.inner = HeaderBuffer::try_from_slice(self.as_slice(), Some(new_cap), allocator)?;
+
+        Ok(())
+    }
+
+
+    // TODO: remove this one?
+    /// Returns the concatenation of two vectors.
+    pub fn concatenate(mut self, mut other: Self) -> Self
+    where
+        T: Clone,
+        A: Clone,
+    {
+        self.append(&mut other);
+
+        self
     }
 }
+
 
 unsafe impl<T: Sync, A: Allocator + Send> Send for AtomicSharedVector<T, A> {}
 
@@ -651,6 +602,18 @@ impl<T: Debug, R: RefCount, A: Allocator> Debug for RefCountedVector<T, R, A> {
     }
 }
 
+impl<T: Clone, A: Allocator + Clone> From<Vector<T, A>> for SharedVector<T, A> {
+    fn from(vector: Vector<T, A>) -> Self {
+        vector.into_shared()
+    }
+}
+
+impl<T: Clone, A: Allocator + Clone> From<Vector<T, A>> for AtomicSharedVector<T, A> {
+    fn from(vector: Vector<T, A>) -> Self {
+        vector.into_shared_atomic()
+    }
+}
+
 // In order to give us a chance to catch leaks and double-frees, test with values that implement drop.
 #[cfg(test)]
 fn num(val: u32) -> Box<u32> {
@@ -738,4 +701,11 @@ fn grow() {
 fn ensure_unique_empty() {
     let mut v: SharedVector<u32> = SharedVector::new();
     v.ensure_unique();
+}
+
+
+#[test]
+fn shrink_to_zero() {
+    let mut v: SharedVector<u32> = SharedVector::new();
+    v.shrink_to(0);
 }

@@ -15,17 +15,17 @@ use crate::{grow_amortized, DefaultRefCount};
 /// <svg width="280" height="120" viewBox="0 0 74.08 31.75" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="a"><stop offset="0" stop-color="#491c9c"/><stop offset="1" stop-color="#d54b27"/></linearGradient><linearGradient xlink:href="#a" id="b" gradientUnits="userSpaceOnUse" x1="6.27" y1="34.86" x2="87.72" y2="13.24" gradientTransform="translate(-2.64 -18.48)"/></defs><rect width="10.57" height="10.66" x="7.94" y="18.45" ry="1.37" fill="#3dbdaa"/><circle cx="12.7" cy="18.48" r=".79" fill="#666"/><path d="M12.7 18.48c0-3.93 7.14-1.28 7.14-5.25" fill="none" stroke="#999" stroke-width=".86" stroke-linecap="round"/><rect width="68.79" height="10.58" x="2.65" y="2.68" ry="1.37" fill="url(#b)"/><rect width="15.35" height="9.51" x="3.18" y="3.21" ry=".9" fill="#78a2d4"/><rect width="9.26" height="9.51" x="19.85" y="3.2" ry=".9" fill="#eaa577"/><rect width="9.26" height="9.51" x="29.64" y="3.22" ry=".9" fill="#eaa577"/><rect width="9.26" height="9.51" x="39.43" y="3.22" ry=".9" fill="#eaa577"/><rect width="9.26" height="9.51" x="49.22" y="3.21" ry=".9" fill="#eaa577"/><circle cx="62.84" cy="7.97" r=".66" fill="#eaa577"/><circle cx="64.7" cy="7.97" r=".66" fill="#eaa577"/><circle cx="66.55" cy="7.97" r=".66" fill="#eaa577"/></svg>
 ///
 /// Similar in principle to a `Vec<T>`.
-/// It can be converted for free into an immutable `SharedVector<T>` or `AtomicSharedVector<T>`.
+/// It can be converted for free into a reference counted `SharedVector<T>` or `AtomicSharedVector<T>`.
 ///
 /// Unique and shared vectors expose similar functionality. `Vector` takes advantage of
 /// the guaranteed uniqueness at the type level to provide overall faster operations than its
 /// shared counterparts, while its memory layout makes it very cheap to convert to a shared vector
-/// (involving not allocation or copy).
+/// (involving no allocation or copy).
 ///
 /// # Internal representation
 ///
 /// `Vector` stores its length and capacity inline and points to the first element of the
-/// allocated buffer. Room for a 16 bytes header is left uninitialized before the first element so that the
+/// allocated buffer. Room for a header is left uninitialized before the elements so that the
 /// vector can be converted into a `SharedVector` or `AtomicSharedVector` without reallocating
 /// the storage.
 pub struct Vector<T, A: Allocator = Global> {
@@ -142,7 +142,6 @@ impl<T, A: Allocator> Vector<T, A> {
 
     unsafe fn base_ptr(&self) -> NonNull<u8> {
         debug_assert!(self.cap > 0);
-        println!(" base_ptr() self data = {:?}", self.data);
         raw::header_from_data_ptr::<Header<DefaultRefCount, A>, T>(self.data).cast()
     }
 
@@ -232,6 +231,11 @@ impl<T, A: Allocator> Vector<T, A> {
         }
     }
 
+    /// Appends an element to the back of a collection.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the new capacity exceeds `u32::MAX` bytes.
     #[inline]
     pub fn push(&mut self, val: T) {
         let len = self.len;
@@ -267,8 +271,8 @@ impl<T, A: Allocator> Vector<T, A> {
         Ok(())
     }
 
-    #[inline]
     /// Removes the last element from the vector and returns it, or `None` if it is empty.
+    #[inline]
     pub fn pop(&mut self) -> Option<T> {
         if self.len == 0 {
             return None;
@@ -307,6 +311,7 @@ impl<T, A: Allocator> Vector<T, A> {
         }
     }
 
+    /// Clones and appends the contents of the slice to the back of a collection.
     pub fn push_slice(&mut self, data: &[T])
     where
         T: Clone,
@@ -334,6 +339,7 @@ impl<T, A: Allocator> Vector<T, A> {
         }
     }
 
+    /// Appends the contents of an iterator to the back of a collection.
     pub fn extend(&mut self, data: impl IntoIterator<Item = T>) {
         let mut iter = data.into_iter();
         let (min, max) = iter.size_hint();
@@ -418,6 +424,10 @@ impl<T, A: Allocator> Vector<T, A> {
         type R = DefaultRefCount;
 
         unsafe {
+            if new_cap == 0 {
+                self.deallocate();
+            }
+
             let new_layout = buffer_layout::<Header<R, A>, T>(new_cap).unwrap();
 
             let new_alloc = if self.cap == 0 {
@@ -427,7 +437,12 @@ impl<T, A: Allocator> Vector<T, A> {
                 let old_ptr = self.base_ptr();
                 let old_layout = buffer_layout::<Header<R, A>, T>(old_cap).unwrap();
                 let new_layout = buffer_layout::<Header<R, A>, T>(new_cap).unwrap();
-                self.allocator.grow(old_ptr, old_layout, new_layout)?
+
+                if new_layout.size() >= old_layout.size() {
+                    self.allocator.grow(old_ptr, old_layout, new_layout)
+                } else {
+                    self.allocator.shrink(old_ptr, old_layout, new_layout)
+                }?
             };
 
             let new_data_ptr = crate::raw::data_ptr::<Header<R, A>, T>(new_alloc.cast());
@@ -437,6 +452,18 @@ impl<T, A: Allocator> Vector<T, A> {
 
         Ok(())
     }
+
+    // Deallocates the memory, does not drop the vector's content.
+    unsafe fn deallocate(&mut self) {
+        let layout = buffer_layout::<Header<DefaultRefCount, A>, T>(self.capacity()).unwrap();
+        let ptr = self.base_ptr();
+
+        self.allocator.deallocate(ptr, layout);
+
+        self.cap = 0;
+        self.len = 0;
+        self.data = NonNull::dangling();
+}
 
     #[inline]
     pub fn reserve(&mut self, additional: usize) {
@@ -538,9 +565,7 @@ impl<T, A: Allocator> Drop for Vector<T, A> {
         self.clear();
 
         unsafe {
-            let layout = buffer_layout::<Header<DefaultRefCount, A>, T>(self.capacity()).unwrap();
-            let ptr = self.base_ptr();
-            self.allocator.deallocate(ptr, layout);
+            self.deallocate();
         }
     }
 }
@@ -635,6 +660,24 @@ impl<T: Debug, A: Allocator + Clone> Debug for Vector<T, A> {
     }
 }
 
+impl<T: Clone, A: Allocator + Clone> From<SharedVector<T, A>> for Vector<T, A> {
+    fn from(shared: SharedVector<T, A>) -> Self {
+        shared.into_unique()
+    }
+}
+
+impl<T: Clone, A: Allocator + Clone> From<AtomicSharedVector<T, A>> for Vector<T, A> {
+    fn from(shared: AtomicSharedVector<T, A>) -> Self {
+        shared.into_unique()
+    }
+}
+
+impl<T: core::hash::Hash, A: Allocator> core::hash::Hash for Vector<T, A> {
+    fn hash<H>(&self, state: &mut H) where H: core::hash::Hasher {
+        self.as_slice().hash(state)
+    }
+}
+
 #[test]
 fn bump_alloc() {
     use blink_alloc::BlinkAlloc;
@@ -718,4 +761,21 @@ fn basic_unique() {
     d.push_slice(&[num(3), num(4)]);
 
     assert_eq!(d.as_slice(), &[num(0), num(1), num(2), num(3), num(4)]);
+}
+
+#[test]
+fn shrink() {
+    let mut v: Vector<u32> = Vector::with_capacity(32);
+    v.shrink_to(8);
+}
+
+#[test]
+fn zst() {
+    let mut v = Vector::new();
+    v.push(());
+    v.push(());
+    v.push(());
+    v.push(());
+
+    assert_eq!(v.len(), 4);
 }
