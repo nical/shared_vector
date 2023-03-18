@@ -93,6 +93,46 @@ impl<T> Vector<T, Global> {
 }
 
 impl<T, A: Allocator> Vector<T, A> {
+    /// Creates an empty vector without allocating memory.
+    pub fn new_in(allocator: A) -> Self {
+        Self::try_with_capacity_in(0, allocator).unwrap()
+    }
+
+    /// Creates an empty pre-allocated vector with a given storage capacity.
+    ///
+    /// Does not allocate memory if `cap` is zero.
+    pub fn with_capacity_in(cap: usize, allocator: A) -> Self {
+        Self::try_with_capacity_in(cap, allocator).unwrap()
+    }
+
+    /// Creates an empty pre-allocated vector with a given storage capacity.
+    ///
+    /// Does not allocate memory if `cap` is zero.
+    pub fn try_with_capacity_in(cap: usize, allocator: A) -> Result<Vector<T, A>, AllocError> {
+        if cap == 0 {
+            return Ok(Vector {
+                data: NonNull::dangling(),
+                len: 0,
+                cap: 0,
+                allocator,
+            });
+        }
+
+        unsafe {
+            let (base_ptr, cap) = raw::allocate_header_buffer::<T, A>(cap, &allocator)?;
+            let data = NonNull::new_unchecked(raw::data_ptr::<raw::Header<DefaultRefCount, A>, T>(
+                base_ptr.cast(),
+            ));
+            Ok(Vector {
+                data,
+                len: 0,
+                cap: cap as BufferSize,
+                allocator,
+            })
+        }
+    }
+
+
     #[inline]
     /// Returns `true` if the vector contains no elements.
     pub fn is_empty(&self) -> bool {
@@ -165,33 +205,6 @@ impl<T, A: Allocator> Vector<T, A> {
             mem::forget(self);
 
             HeaderBuffer::from_raw(header)
-        }
-    }
-
-    /// Creates an empty pre-allocated vector with a given storage capacity.
-    ///
-    /// Does not allocate memory if `cap` is zero.
-    pub fn try_with_capacity_in(cap: usize, allocator: A) -> Result<Vector<T, A>, AllocError> {
-        if cap == 0 {
-            return Ok(Vector {
-                data: NonNull::dangling(),
-                len: 0,
-                cap: 0,
-                allocator,
-            });
-        }
-
-        unsafe {
-            let (base_ptr, cap) = raw::allocate_header_buffer::<T, A>(cap, &allocator)?;
-            let data = NonNull::new_unchecked(raw::data_ptr::<raw::Header<DefaultRefCount, A>, T>(
-                base_ptr.cast(),
-            ));
-            Ok(Vector {
-                data,
-                len: 0,
-                cap: cap as BufferSize,
-                allocator,
-            })
         }
     }
 

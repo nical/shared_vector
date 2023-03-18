@@ -72,6 +72,16 @@ impl<T, R: RefCount> RefCountedVector<T, R, Global> {
 }
 
 impl<T, R: RefCount, A: Allocator> RefCountedVector<T, R, A> {
+    /// Creates an empty vector without allocating memory.
+    pub fn new_in(allocator: A) -> Self {
+        Self::try_with_capacity_in(0, allocator).unwrap()
+    }
+
+    /// Creates an empty pre-allocated vector with a given storage capacity.
+    pub fn with_capacity_in(cap: usize, allocator: A) -> Self {
+        Self::try_with_capacity_in(cap, allocator).unwrap()
+    }
+
     /// Tries to construct a new, empty vector with at least the specified capacity.
     #[inline]
     pub fn try_with_capacity_in(cap: usize, allocator: A) -> Result<Self, AllocError> {
