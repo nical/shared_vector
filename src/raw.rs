@@ -404,7 +404,7 @@ impl<T, R: RefCount, A: Allocator> HeaderBuffer<T, R, A> {
         Some(popped)
     }
 
-    pub unsafe fn try_push_slice(&mut self, data: &[T]) -> Result<(), AllocError>
+    pub unsafe fn try_extend_from_slice(&mut self, data: &[T]) -> Result<(), AllocError>
     where
         T: Clone,
         R: RefCount,

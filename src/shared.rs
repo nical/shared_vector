@@ -72,6 +72,16 @@ impl<T, R: RefCount> RefCountedVector<T, R, Global> {
 }
 
 impl<T, R: RefCount, A: Allocator> RefCountedVector<T, R, A> {
+    /// Creates an empty vector without allocating memory.
+    pub fn new_in(allocator: A) -> Self {
+        Self::try_with_capacity_in(0, allocator).unwrap()
+    }
+
+    /// Creates an empty pre-allocated vector with a given storage capacity.
+    pub fn with_capacity_in(cap: usize, allocator: A) -> Self {
+        Self::try_with_capacity_in(cap, allocator).unwrap()
+    }
+
     /// Tries to construct a new, empty vector with at least the specified capacity.
     #[inline]
     pub fn try_with_capacity_in(cap: usize, allocator: A) -> Result<Self, AllocError> {
@@ -272,10 +282,10 @@ impl<T: Clone, R: RefCount, A: Allocator + Clone> RefCountedVector<T, R, A> {
     }
 
     /// Clones and appends the contents of the slice to the back of a collection.
-    pub fn push_slice(&mut self, data: &[T]) {
+    pub fn extend_from_slice(&mut self, data: &[T]) {
         self.reserve(data.len());
         unsafe {
-            self.inner.try_push_slice(data).unwrap();
+            self.inner.try_extend_from_slice(data).unwrap();
         }
     }
 
@@ -432,7 +442,7 @@ impl<T: Clone, R: RefCount, A: Allocator + Clone> RefCountedVector<T, R, A> {
                 other.inner.move_data(&mut self.inner);
             } else {
                 // Slow path, clone each item.
-                self.inner.try_push_slice(other.as_slice()).unwrap();
+                self.inner.try_extend_from_slice(other.as_slice()).unwrap();
                 *other =
                     Self::try_with_capacity_in(other.capacity(), self.inner.allocator().clone())
                         .unwrap();
@@ -675,7 +685,7 @@ fn grow() {
     a.push(num(2));
     a.push(num(3));
 
-    a.push_slice(&[num(4), num(5), num(6), num(7), num(8), num(9), num(10), num(12), num(12), num(13), num(14), num(15), num(16), num(17), num(18)]);
+    a.extend_from_slice(&[num(4), num(5), num(6), num(7), num(8), num(9), num(10), num(12), num(12), num(13), num(14), num(15), num(16), num(17), num(18)]);
 
     assert_eq!(
         a.as_slice(),
