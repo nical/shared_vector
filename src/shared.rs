@@ -114,6 +114,11 @@ impl<T, R: RefCount, A: Allocator> RefCountedVector<T, R, A> {
         self.inner.remaining_capacity() as usize
     }
 
+    /// Returns a reference to the underlying allocator.
+    pub fn allocator(&self) -> &A {
+        self.inner.allocator()
+    }
+
     /// Creates a new reference without allocating.
     ///
     /// Equivalent to `Clone::clone`.
@@ -572,8 +577,10 @@ impl<'a, T: Clone, R: RefCount, A: Allocator + Clone> IntoIterator
     }
 }
 
-impl<T, R: RefCount, A: Allocator, I> Index<I> for RefCountedVector<T, R, A>
+impl<T, R, A, I> Index<I> for RefCountedVector<T, R, A>
 where
+    R: RefCount,
+    A: Allocator,
     I: core::slice::SliceIndex<[T]>,
 {
     type Output = <I as core::slice::SliceIndex<[T]>>::Output;
@@ -582,10 +589,11 @@ where
     }
 }
 
-impl<T, R: RefCount, A: Allocator, I> IndexMut<I> for RefCountedVector<T, R, A>
+impl<T, R, A, I> IndexMut<I> for RefCountedVector<T, R, A>
 where
     T: Clone,
-    A: Clone,
+    R: RefCount,
+    A: Allocator + Clone,
     I: core::slice::SliceIndex<[T]>,
 {
     fn index_mut(&mut self, index: I) -> &mut Self::Output {

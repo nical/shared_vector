@@ -157,6 +157,12 @@ impl<T, A: Allocator> Vector<T, A> {
         (self.cap - self.len) as usize
     }
 
+    /// Returns a reference to the underlying allocator.
+    #[inline]
+    pub fn allocator(&self) -> &A {
+        &self.allocator
+    }
+
     #[inline]
     fn data_ptr(&self) -> *mut T {
         self.data.as_ptr()
