@@ -5,7 +5,7 @@ use core::{mem, ptr};
 
 use crate::alloc::{AllocError, Allocator, Global};
 use crate::raw::{BufferSize, HeaderBuffer};
-use crate::vector::Vector;
+use crate::vector::{Vector, RawVector};
 use crate::{grow_amortized, AtomicRefCount, DefaultRefCount, RefCount};
 
 /// A heap allocated, atomically reference counted, immutable contiguous buffer containing elements of type `T`.
@@ -211,9 +211,11 @@ impl<T: Clone, R: RefCount, A: Allocator + Clone> RefCountedVector<T, R, A> {
             mem::forget(self);
 
             Vector {
-                data,
-                len,
-                cap,
+                raw: RawVector {
+                    data,
+                    len,
+                    cap,
+                },
                 allocator,
             }
         }
