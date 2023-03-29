@@ -12,7 +12,7 @@ pub enum Cmd {
     Clear { idx: usize },
     Push { idx: usize, val: u32 },
     PushWithinCapacity { idx: usize, val: u32 },
-    PushSlice { idx: usize },
+    ExtendFromSlice { idx: usize },
     Pop { idx: usize },
     CloneBuffer { src_idx: usize, dst_idx: usize },
     Iter { idx: usize },
@@ -56,8 +56,8 @@ fn cmd_to_string(vec_type: &str, cmd: Cmd) -> String {
         Cmd::PushWithinCapacity { idx, val } => {
             format!("vectors[{}].push_within_capacity(Box::new({val}));", slot(idx))
         }
-        Cmd::PushSlice { idx } => {
-            format!("vectors[{}].push_slice(&[Box::new(1), Box::new(2), Box::new(3)]);", slot(idx)) 
+        Cmd::ExtendFromSlice { idx } => {
+            format!("vectors[{}].extend_from_slice(&[Box::new(1), Box::new(2), Box::new(3)]);", slot(idx)) 
         }
         Cmd::Pop { idx } => {
             format!("vectors[{}].pop();", slot(idx))
