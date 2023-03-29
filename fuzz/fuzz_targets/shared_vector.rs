@@ -35,8 +35,8 @@ fuzz_target!(|cmds: Vec<Cmd>| {
             Cmd::Pop { idx } => {
                 vectors[slot(idx)].pop();
             }
-            Cmd::PushSlice { idx } => {
-                vectors[slot(idx)].push_slice(&[Box::new(1), Box::new(2), Box::new(3)]);
+            Cmd::ExtendFromSlice { idx } => {
+                vectors[slot(idx)].extend_from_slice(&[Box::new(1), Box::new(2), Box::new(3)]);
             }
             Cmd::CloneBuffer { src_idx, dst_idx } => {
                 vectors[slot(dst_idx)] = vectors[slot(src_idx)].clone_buffer();
