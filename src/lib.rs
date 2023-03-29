@@ -7,7 +7,7 @@ mod vector;
 
 pub use raw::{AtomicRefCount, BufferSize, DefaultRefCount, RefCount};
 pub use shared::{AtomicSharedVector, RefCountedVector, SharedVector};
-pub use vector::Vector;
+pub use vector::{Vector, RawVector};
 
 pub mod alloc {
     pub use allocator_api2::alloc::{AllocError, Allocator, Global};
