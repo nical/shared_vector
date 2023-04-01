@@ -229,6 +229,43 @@ impl<T> RawVector<T> {
         unsafe { Some(ptr::read(self.data_ptr().add(self.len as usize))) }
     }
 
+    /// Removes and returns the element at position `index` within the vector,
+    /// shifting all elements after it to the left.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index` is out of bounds.
+    ///
+    pub fn remove(&mut self, index: usize) -> T {
+        #[cold]
+        #[inline(never)]
+        #[track_caller]
+        fn assert_failed(index: usize, len: usize) -> ! {
+            panic!("removal index (is {index}) should be < len (is {len})");
+        }
+
+        let len = self.len();
+        if index >= len {
+            assert_failed(index, len);
+        }
+        unsafe {
+            // infallible
+            let ret;
+            {
+                // the place we are taking from.
+                let ptr = self.as_mut_ptr().add(index);
+                // copy it out, unsafely having a copy of the value on
+                // the stack and in the vector at the same time.
+                ret = ptr::read(ptr);
+
+                // Shift everything down to fill in that spot.
+                ptr::copy(ptr.add(1), ptr, len - index - 1);
+            }
+            self.len = len as u32 - 1;
+            ret
+        }
+    }
+
     /// Removes an element from the vector and returns it.
     ///
     /// The removed element is replaced by the last element of the vector.
@@ -918,6 +955,18 @@ impl<T, A: Allocator> Vector<T, A> {
     #[inline(always)]
     pub fn pop(&mut self) -> Option<T> {
         self.raw.pop()
+    }
+
+    /// Removes and returns the element at position `index` within the vector,
+    /// shifting all elements after it to the left.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index` is out of bounds.
+    ///
+    #[inline(always)]
+    pub fn remove(&mut self, index: usize) -> T {
+        self.raw.remove(index)
     }
 
     /// Removes an element from the vector and returns it.

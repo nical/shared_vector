@@ -91,6 +91,9 @@ fuzz_target!(|cmds: Vec<Cmd>| {
                     vec.swap(offsets.0 % len, offsets.1 % len)
                 }
             }
+            Cmd::Remove { .. } => {
+                // TODO
+            }
             Cmd::SwapRemove { idx, offset } => {
                 let vec = &mut vectors[slot(idx)];
                 if vec.is_empty() {
