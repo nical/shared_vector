@@ -32,6 +32,8 @@ pub enum Cmd {
     SwapRemove { idx: usize, offset: usize },
     ShrinkTo { idx: usize, cap: usize },
     ShrinkToFit { idx: usize },
+    Drain { idx: usize, start: usize, count: usize },
+    Splice { idx: usize, start: usize, rem_count: usize, val: u32, add_count: usize },
 }
 
 fn cmd_to_string(vec_type: &str, cmd: Cmd) -> String {
@@ -144,6 +146,23 @@ fn cmd_to_string(vec_type: &str, cmd: Cmd) -> String {
         }
         Cmd::ShrinkToFit { idx } => {
             format!("vectors[{}].shrink_to_fit();", slot(idx))
+        }
+        Cmd::Drain { idx, start, count } => {
+            let s1 = format!("let vec = &mut vectors[{}];", slot(idx));
+            let s2 = format!("let len = vec.len();");
+            let s3 = format!("let start = if len > 0 {{ {start} % len }} else {{ 0 }};");
+            let s4 = format!("let end = {}.min(len);", (start + (count % 5)));
+            let s5 = format!("vectors[{}].drain(start..end);", slot(idx));
+            format!("{s1}\n    {s2}\n    {s3}\n    {s4}\n    {s5}")
+        }
+        Cmd::Splice { idx, start, rem_count, val, add_count } => {
+            let s1 = format!("let vec = &mut vectors[{}];", slot(idx));
+            let s2 = format!("let len = vec.len();");
+            let s3 = format!("let start = if len > 0 {{ {start} % len }} else {{ 0 }};");
+            let s4 = format!("let end = (start + {}).min(len);", rem_count % 5);
+            let s5 = format!("let items = vec![Box::new({val}); {}];", add_count % 10);
+            let s6 = format!("vectors[{}].splice(start..end, items.into_iter());", slot(idx));
+            format!("{s1}\n    {s2}\n    {s3}\n    {s4}\n    {s5}\n    {s6}")
         }
     }
 }

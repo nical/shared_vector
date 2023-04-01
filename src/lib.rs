@@ -4,6 +4,8 @@
 mod raw;
 mod shared;
 mod vector;
+mod drain;
+mod splice;
 
 pub use raw::{AtomicRefCount, BufferSize, DefaultRefCount, RefCount};
 pub use shared::{AtomicSharedVector, RefCountedVector, SharedVector};

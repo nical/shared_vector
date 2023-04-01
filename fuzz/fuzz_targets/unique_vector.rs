@@ -8,6 +8,12 @@ use cmd::*;
 
 fuzz_target!(|cmds: Vec<Cmd>| {
 
+    //fn print() {
+    //    use Cmd::*;
+    //    cmds_to_src("Vector", &[]);
+    //}
+    //print();
+
     let mut vectors: [Vector<Box<u32>>; 4] = [
         Vector::new(),
         Vector::new(),
@@ -101,6 +107,21 @@ fuzz_target!(|cmds: Vec<Cmd>| {
             }
             Cmd::ShrinkToFit { idx } => {
                 vectors[slot(idx)].shrink_to_fit();
+            }
+            Cmd::Drain { idx, start, count } => {
+                let vec = &mut vectors[slot(idx)];
+                let len = vec.len();
+                let start = if len > 0 { start % len} else { 0 };
+                let end = (start + (count % 5)).min(len);
+                vectors[slot(idx)].drain(start..end);
+            }
+            Cmd::Splice { idx, start, rem_count, val, add_count } => {
+                let vec = &mut vectors[slot(idx)];
+                let len = vec.len();
+                let start = if len > 0 { start % len } else { 0 };
+                let end = (start + (rem_count % 5)).min(len);
+                let items = vec![Box::new(val); add_count % 10];
+                vectors[slot(idx)].splice(start..end, items.into_iter());
             }
         }
     }

@@ -104,6 +104,12 @@ fuzz_target!(|cmds: Vec<Cmd>| {
             Cmd::ShrinkToFit { idx } => {
                 vectors[slot(idx)].shrink_to_fit();
             }
+            Cmd::Drain { .. } => {
+                // TODO
+            }
+            Cmd::Splice { .. } => {
+                // TODO
+            }
         }
     }
 });

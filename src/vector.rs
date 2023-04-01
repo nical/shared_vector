@@ -2,12 +2,15 @@ use core::fmt::Debug;
 use core::ops::{Deref, DerefMut, Index, IndexMut};
 use core::ptr::NonNull;
 use core::{mem, ptr};
+use std::ops::RangeBounds;
 
 use crate::alloc::{AllocError, Allocator, Global};
+use crate::drain::Drain;
 use crate::raw::{
     self, buffer_layout, AtomicRefCount, BufferSize, Header, HeaderBuffer, RefCount, VecHeader,
 };
 use crate::shared::{AtomicSharedVector, SharedVector};
+use crate::splice::Splice;
 use crate::{grow_amortized, DefaultRefCount};
 
 /// A heap allocated, mutable contiguous buffer containing elements of type `T`, with manual deallocation.
@@ -494,6 +497,108 @@ impl<T> RawVector<T> {
         self.shrink_to(allocator, self.len())
     }
 
+    /// Removes the specified range from the vector in bulk, returning all
+    /// removed elements as an iterator. If the iterator is dropped before
+    /// being fully consumed, it drops the remaining removed elements.
+    ///
+    /// The returned iterator keeps a mutable borrow on the vector to optimize
+    /// its implementation.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the starting point is greater than the end point or if
+    /// the end point is greater than the length of the vector.
+    ///
+    /// # Leaking
+    ///
+    /// If the returned iterator goes out of scope without being dropped (due to
+    /// [`mem::forget`], for example), the vector may have lost and leaked
+    /// elements arbitrarily, including elements outside the range.
+    ///
+    pub fn drain<R>(&mut self, range: R) -> Drain<'_, T>
+    where
+        R: RangeBounds<usize>,
+    {
+        // Memory safety
+        //
+        // When the Drain is first created, it shortens the length of
+        // the source vector to make sure no uninitialized or moved-from elements
+        // are accessible at all if the Drain's destructor never gets to run.
+        //
+        // Drain will ptr::read out the values to remove.
+        // When finished, remaining tail of the vec is copied back to cover
+        // the hole, and the vector length is restored to the new length.
+        //
+        use core::ops::Bound::*;
+        let len = self.len();
+        let end = match range.end_bound() {
+            Included(n) => *n + 1,
+            Excluded(n) => *n,
+            Unbounded => len
+        };
+        let start = match range.start_bound() {
+            Included(n) => *n,
+            Excluded(n) => *n+1,
+            Unbounded => 0
+        };
+        assert!(end <= len);
+        assert!(start <= end);
+
+        unsafe {
+            // Set self.vec length's to start, to be safe in case Drain is leaked
+            self.len = start as u32;
+            let range_slice = core::slice::from_raw_parts(self.as_ptr().add(start), end - start);
+            Drain {
+                tail_start: end,
+                tail_len: len - end,
+                iter: range_slice.iter(),
+                vec: NonNull::from(self),
+            }
+        }        
+    }
+
+    /// Creates a splicing iterator that replaces the specified range in the vector
+    /// with the given `replace_with` iterator and yields the removed items.
+    /// `replace_with` does not need to be the same length as `range`.
+    ///
+    /// `range` is removed even if the iterator is not consumed until the end.
+    ///
+    /// It is unspecified how many elements are removed from the vector
+    /// if the `Splice` value is leaked.
+    ///
+    /// The input iterator `replace_with` is only consumed when the `Splice` value is dropped.
+    ///
+    /// This is optimal if:
+    ///
+    /// * The tail (elements in the vector after `range`) is empty,
+    /// * or `replace_with` yields fewer or equal elements than `range`’s length
+    /// * or the lower bound of its `size_hint()` is exact.
+    ///
+    /// Otherwise, a temporary vector is allocated and the tail is moved twice.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the starting point is greater than the end point or if
+    /// the end point is greater than the length of the vector.
+    ///
+    pub unsafe fn splice<'l, A, R, I>(
+        &'l mut self,
+        allocator: &'l A,
+        range: R,
+        replace_with: I
+    ) -> Splice<'l, <I as IntoIterator>::IntoIter, A>
+    where
+        A: Allocator,
+        R: RangeBounds<usize>,
+        I: IntoIterator<Item = T>,
+    {
+        Splice {
+            drain: self.drain(range),
+            replace_with: replace_with.into_iter(),
+            allocator,
+        }
+    }
+
     /// Transfers ownership of this raw vector's contents to the one that is returned, and leaves
     /// this one empty and unallocated.
     pub fn take(&mut self) -> Self {
@@ -956,6 +1061,67 @@ impl<T, A: Allocator> Vector<T, A> {
         }
     }
 
+    /// Removes the specified range from the vector in bulk, returning all
+    /// removed elements as an iterator. If the iterator is dropped before
+    /// being fully consumed, it drops the remaining removed elements.
+    ///
+    /// The returned iterator keeps a mutable borrow on the vector to optimize
+    /// its implementation.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the starting point is greater than the end point or if
+    /// the end point is greater than the length of the vector.
+    ///
+    /// # Leaking
+    ///
+    /// If the returned iterator goes out of scope without being dropped (due to
+    /// [`mem::forget`], for example), the vector may have lost and leaked
+    /// elements arbitrarily, including elements outside the range.
+    ///
+    pub fn drain<R>(&mut self, range: R) -> Drain<'_, T>
+    where
+        R: RangeBounds<usize>,
+    {
+        self.raw.drain(range)
+    }
+
+    /// Creates a splicing iterator that replaces the specified range in the vector
+    /// with the given `replace_with` iterator and yields the removed items.
+    /// `replace_with` does not need to be the same length as `range`.
+    ///
+    /// `range` is removed even if the iterator is not consumed until the end.
+    ///
+    /// It is unspecified how many elements are removed from the vector
+    /// if the `Splice` value is leaked.
+    ///
+    /// The input iterator `replace_with` is only consumed when the `Splice` value is dropped.
+    ///
+    /// This is optimal if:
+    ///
+    /// * The tail (elements in the vector after `range`) is empty,
+    /// * or `replace_with` yields fewer or equal elements than `range`’s length
+    /// * or the lower bound of its `size_hint()` is exact.
+    ///
+    /// Otherwise, a temporary vector is allocated and the tail is moved twice.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the starting point is greater than the end point or if
+    /// the end point is greater than the length of the vector.
+    ///
+    pub fn splice<R, I>(
+        &mut self,
+        range: R,
+        replace_with: I
+    ) -> Splice<'_, <I as IntoIterator>::IntoIter, A>
+    where
+        R: RangeBounds<usize>,
+        I: IntoIterator<Item = T>,
+    {
+        unsafe { self.raw.splice(&self.allocator, range, replace_with) }
+    } 
+
     #[inline(always)]
     pub fn take(&mut self) -> Self
     where
@@ -1229,4 +1395,28 @@ fn borrowd_dyn_alloc() {
     let mut ds2 = DataStructure::new_in(&alloc);
     ds2.push(2);
 
+}
+
+#[test]
+fn splice1() {
+    let mut vec = Vector::new();
+    vec.splice(0..0, vec![Box::new(1); 5].into_iter());
+    vec.splice(0..0, vec![Box::new(2); 5].into_iter());
+}
+
+#[test]
+fn drain1() {
+    let mut vectors: [Vector<Box<u32>>; 4] = [
+        Vector::new(),
+        Vector::new(),
+        Vector::new(),
+        Vector::new(),
+    ];
+    vectors[0].shrink_to(3906369431118283232);
+    vectors[2].extend_from_slice(&[Box::new(1), Box::new(2), Box::new(3)]);
+    let vec = &mut vectors[2];
+    let len = vec.len();
+    let start = if len > 0 { 16059518370053021184 % len } else { 0 };
+    let end = 16059518370053021185.min(len);
+    vectors[2].drain(start..end);
 }
