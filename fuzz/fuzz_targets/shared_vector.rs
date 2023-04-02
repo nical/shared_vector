@@ -116,6 +116,10 @@ fuzz_target!(|cmds: Vec<Cmd>| {
             Cmd::Splice { .. } => {
                 // TODO
             }
+            Cmd::Retain { .. } => {
+                // let mut i = 0;
+                // vectors[slot(idx)].retain(&mut |_: &Box<u32>| { i += 1; bits & (1 << i.min(31)) != 0 });
+            }
         }
     }
 });

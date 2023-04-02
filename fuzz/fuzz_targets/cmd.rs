@@ -32,6 +32,7 @@ pub enum Cmd {
     Remove { idx: usize, offset: usize },
     SwapRemove { idx: usize, offset: usize },
     Insert { idx: usize, offset: usize, val: u32 },
+    Retain { idx: usize, bits: u32 },
     ShrinkTo { idx: usize, cap: usize },
     ShrinkToFit { idx: usize },
     Drain { idx: usize, start: usize, count: usize },
@@ -175,6 +176,9 @@ fn cmd_to_string(vec_type: &str, cmd: Cmd) -> String {
             let s5 = format!("let items = vec![Box::new({val}); {}];", add_count % 10);
             let s6 = format!("vectors[{}].splice(start..end, items.into_iter());", slot(idx));
             format!("{s1}\n    {s2}\n    {s3}\n    {s4}\n    {s5}\n    {s6}")
+        }
+        Cmd::Retain { idx, bits } =>  {
+            format!("let mut i = 0;\n    vectors[{}].retain(&mut |val: &Box<u32>| {{ i += 1; {bits} & (1 << i.min(31)) != 0 }});", slot(idx))
         }
     }
 }
