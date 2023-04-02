@@ -109,6 +109,10 @@ fuzz_target!(|cmds: Vec<Cmd>| {
                 }
                 vec.swap_remove(offset % vec.len());
             }
+            Cmd::Insert { idx, offset, val } => {
+                let len = vectors[slot(idx)].len();
+                vectors[slot(idx)].insert(offset % len.max(1), Box::new(val));
+            }
             Cmd::ShrinkTo { idx, cap } => {
                 vectors[slot(idx)].shrink_to(cap);
             }

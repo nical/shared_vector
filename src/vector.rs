@@ -294,6 +294,48 @@ impl<T> RawVector<T> {
         }
     }
 
+    /// Inserts an element at position `index` within the vector, shifting all
+    /// elements after it to the right.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index > len`.
+    pub unsafe fn insert<A: Allocator>(&mut self, allocator: &A, index: usize, element: T) {
+        #[cold]
+        #[inline(never)]
+        fn assert_failed(index: usize, len: usize) -> ! {
+            panic!("insertion index (is {index}) should be <= len (is {len})");
+        }
+
+        unsafe {
+            // space for the new element
+            if self.len == self.cap {
+                self.try_reserve(allocator, 1).unwrap();
+            }
+
+            let len = self.len();
+
+            // infallible
+            // The spot to put the new value
+            {
+                let p = self.as_mut_ptr().add(index);
+                if index < len {
+                    // Shift everything over to make space. (Duplicating the
+                    // `index`th element into two consecutive places.)
+                    ptr::copy(p, p.add(1), len - index);
+                } else if index == len {
+                    // No elements need shifting.
+                } else {
+                    assert_failed(index, len);
+                }
+                // Write it in, overwriting the first copy of the `index`th
+                // element.
+                ptr::write(p, element);
+            }
+            self.len += 1;
+        }
+    }
+
     /// Clones and appends the contents of the slice to the back of a collection.
     ///
     /// # Safety
@@ -979,6 +1021,17 @@ impl<T, A: Allocator> Vector<T, A> {
     #[inline(always)]
     pub fn swap_remove(&mut self, idx: usize) -> T {
         self.raw.swap_remove(idx)
+    }
+
+    /// Inserts an element at position `index` within the vector, shifting all
+    /// elements after it to the right.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index > len`.
+    #[inline(always)]
+    pub fn insert(&mut self, index: usize, element: T) {
+       unsafe { self.raw.insert(&self.allocator, index, element) }
     }
 
     /// Clones and appends the contents of the slice to the back of a collection.

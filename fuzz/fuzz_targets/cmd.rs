@@ -31,6 +31,7 @@ pub enum Cmd {
     Swap { idx: usize, offsets: (usize, usize) },
     Remove { idx: usize, offset: usize },
     SwapRemove { idx: usize, offset: usize },
+    Insert { idx: usize, offset: usize, val: u32 },
     ShrinkTo { idx: usize, cap: usize },
     ShrinkToFit { idx: usize },
     Drain { idx: usize, start: usize, count: usize },
@@ -145,6 +146,11 @@ fn cmd_to_string(vec_type: &str, cmd: Cmd) -> String {
         Cmd::SwapRemove { idx, offset } => {
             let a = format!("let vec = &mut vectors[{}];", slot(idx));
             let b = format!("if !vec.is_empty() {{ vec.swap_remove({offset} % vec.len()); }}");
+            format!("{a}\n    {b}")
+        }
+        Cmd::Insert { idx, offset, val } => {
+            let a = format!("let len = vectors[{}].len();", slot(idx));
+            let b = format!("vectors[{}].insert({offset} % len.max(1), Box::new({val}));", slot(idx));
             format!("{a}\n    {b}")
         }
         Cmd::ShrinkTo { idx, cap } => {

@@ -101,6 +101,9 @@ fuzz_target!(|cmds: Vec<Cmd>| {
                 }
                 vec.swap_remove(offset % vec.len());
             }
+            Cmd::Insert { idx, offset, val } => {
+                // TODO
+            }
             Cmd::ShrinkTo { idx, cap } => {
                 vectors[slot(idx)].shrink_to(cap);
             }
