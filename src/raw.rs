@@ -5,7 +5,7 @@ use core::mem;
 use core::ptr::{self, NonNull};
 use core::sync::atomic::{
     AtomicI32,
-    Ordering::{Acquire, Relaxed, Release},
+    Ordering::{Relaxed, Release},
 };
 
 pub use crate::alloc::{AllocError, Allocator, Global};
@@ -23,9 +23,14 @@ pub struct DefaultRefCount(UnsafeCell<i32>);
 pub struct AtomicRefCount(AtomicI32);
 
 #[repr(C)]
+#[derive(Clone)]
 pub struct VecHeader {
     pub cap: BufferSize,
     pub len: BufferSize,
+}
+
+impl VecHeader {
+    fn remaining_capacity(&self) -> u32 { self.cap - self.len }
 }
 
 #[repr(C)]
@@ -88,7 +93,7 @@ pub unsafe fn data_ptr<Header, T>(header: NonNull<Header>) -> *mut T {
     (header.as_ptr() as *mut u8).add(header_size::<Header, T>()) as *mut T
 }
 
-const fn header_size<Header, T>() -> usize {
+pub(crate) const fn header_size<Header, T>() -> usize {
     let a = mem::align_of::<T>();
     let s = mem::size_of::<Header>();
     let size = if a > s { a } else { s };
@@ -129,7 +134,7 @@ pub unsafe fn dealloc<T, R, A: Allocator>(mut ptr: NonNull<Header<R, A>>, cap: B
 }
 
 #[cold]
-fn capacity_error() -> AllocError {
+pub fn alloc_error_cold() -> AllocError {
     AllocError
 }
 
@@ -147,355 +152,110 @@ impl<T, R: RefCount, A: Allocator> HeaderBuffer<T, R, A> {
         }
     }
 
-    #[inline(never)]
-    pub fn try_with_capacity(cap: usize, allocator: A) -> Result<Self, AllocError>
-    where
-        A: Allocator,
-        R: RefCount,
-    {
-        assert_ref_count_layout::<R>();
-        unsafe {
-            let (ptr, cap) = allocate_header_buffer::<T, A>(cap, &allocator)?;
-
-            ptr::write(
-                ptr.cast().as_ptr(),
-                Header {
-                    vec: VecHeader {
-                        cap: cap as BufferSize,
-                        len: 0,
-                    },
-                    ref_count: R::new(1),
-                    allocator,
-                },
-            );
-
-            Ok(HeaderBuffer {
-                header: ptr.cast(),
-                _marker: PhantomData,
-            })
-        }
-    }
-
-    pub fn try_from_slice(data: &[T], cap: Option<usize>, allocator: A) -> Result<Self, AllocError>
-    where
-        T: Clone,
-        R: RefCount,
-        A: Allocator,
-    {
-        let len = data.len();
-        let cap = cap.map(|cap| cap.max(len)).unwrap_or(len);
-
-        if cap > BufferSize::MAX as usize {
-            return Err(capacity_error());
-        }
-
-        let mut buffer = Self::try_with_capacity(cap, allocator)?;
-
-        unsafe {
-            buffer.header.as_mut().vec.len = len as BufferSize;
-
-            let mut ptr = buffer.data_ptr();
-
-            for item in data {
-                ptr::write(ptr, item.clone());
-                ptr = ptr.add(1)
-            }
-        }
-
-        Ok(buffer)
+    #[inline]
+    pub unsafe fn as_mut(&mut self) -> &mut Header<R, A> {
+        self.header.as_mut()
     }
 
     #[inline]
-    pub fn len(&self) -> BufferSize {
-        unsafe { self.header.as_ref().vec.len }
+    pub unsafe fn as_ref(&self) -> &Header<R, A> {
+        self.header.as_ref()
     }
 
     #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    #[inline]
-    pub fn capacity(&self) -> BufferSize {
-        unsafe { self.header.as_ref().vec.cap }
-    }
-
-    #[inline]
-    pub fn remaining_capacity(&self) -> BufferSize {
-        let h = unsafe { self.header.as_ref() };
-        h.vec.cap - h.vec.len
-    }
-
-    /// Allocates a duplicate of this SharedBuffer (fallible).
-    pub fn try_clone_buffer(&self, new_cap: Option<BufferSize>) -> Result<Self, AllocError>
-    where
-        T: Clone,
-        R: RefCount,
-        A: Allocator + Clone,
-    {
-        unsafe {
-            let header = self.header.as_ref();
-            let len = header.vec.len;
-            let cap = if let Some(cap) = new_cap {
-                cap
-            } else {
-                header.vec.cap
-            };
-            let allocator = header.allocator.clone();
-
-            if len > cap {
-                return Err(capacity_error());
-            }
-
-            let mut clone = HeaderBuffer::try_with_capacity(cap as usize, allocator)?;
-
-            if len > 0 {
-                let mut src = self.data_ptr();
-                let mut dst = clone.data_ptr();
-                for _ in 0..len {
-                    ptr::write(dst, (*src).clone());
-                    src = src.add(1);
-                    dst = dst.add(1);
-                }
-
-                clone.set_len(len);
-            }
-
-            Ok(clone)
-        }
-    }
-
-    /// Allocates a duplicate of this SharedBuffer (fallible).
-    pub fn try_copy_buffer(&self, new_cap: Option<BufferSize>) -> Result<Self, AllocError>
-    where
-        T: Copy,
-        R: RefCount,
-        A: Allocator + Clone,
-    {
-        unsafe {
-            let header = self.header.as_ref();
-            let len = header.vec.len;
-            let cap = if let Some(cap) = new_cap {
-                cap
-            } else {
-                header.vec.cap
-            };
-
-            if len > cap {
-                return Err(capacity_error());
-            }
-
-            let allocator = header.allocator.clone();
-            let mut clone = HeaderBuffer::try_with_capacity(cap as usize, allocator)?;
-
-            if len > 0 {
-                core::ptr::copy_nonoverlapping(self.data_ptr(), clone.data_ptr(), len as usize);
-                clone.set_len(len);
-            }
-
-            Ok(clone)
-        }
-    }
-
-    #[inline]
-    pub fn is_unique(&self) -> bool
-    where
-        R: RefCount,
-    {
-        unsafe { self.header.as_ref().ref_count.get() == 1 }
-    }
-
-    #[inline]
-    pub fn as_slice(&self) -> &[T] {
-        unsafe {
-            core::slice::from_raw_parts(self.data_ptr(), self.header.as_ref().vec.len as usize)
-        }
-    }
-
-    #[inline]
-    pub fn as_mut_slice(&mut self) -> &mut [T] {
-        unsafe {
-            core::slice::from_raw_parts_mut(self.data_ptr(), self.header.as_ref().vec.len as usize)
-        }
-    }
-
-    #[inline]
-    pub fn new_ref(&self) -> Self
-    where
-        R: RefCount,
-    {
-        unsafe {
-            self.header.as_ref().ref_count.add_ref();
-        }
-        HeaderBuffer {
-            header: self.header,
-            _marker: PhantomData,
-        }
-    }
-
-    #[inline]
-    pub fn data_ptr(&self) -> *mut T {
-        unsafe { (self.header.as_ptr() as *mut u8).add(header_size::<Header<R, A>, T>()) as *mut T }
+    pub unsafe fn as_ptr(&self) -> *mut Header<R, A> {
+        self.header.as_ptr()
     }
 
     #[inline]
     pub fn allocator(&self) -> &A {
         unsafe { &self.header.as_ref().allocator }
     }
+}
 
-    #[inline]
-    pub fn ptr_eq(&self, other: &Self) -> bool {
-        self.header == other.header
+pub unsafe fn move_data<T>(src_data: *mut T, src_vec: &mut VecHeader, dst_data: *mut T, dst_vec: &mut VecHeader) {
+    debug_assert!(dst_vec.cap - dst_vec.len  >= src_vec.len);
+    let len = src_vec.len;
+    if len > 0 {
+        unsafe {
+            let dst = dst_data.add(dst_vec.len as usize);
+
+            let inital_dst_len = dst_vec.len;
+            dst_vec.len = inital_dst_len + len;
+            src_vec.len = 0;
+
+            ptr::copy_nonoverlapping(src_data, dst, len as usize);
+        }
     }
 }
 
-// SAFETY: All of the following methods require the buffer to be safely mutable. In other
-// words, there is a single reference to the buffer (is_unique() returned true).
-impl<T, R: RefCount, A: Allocator> HeaderBuffer<T, R, A> {
-    #[inline]
-    pub unsafe fn set_len(&mut self, new_len: BufferSize) {
-        debug_assert!(self.is_unique());
-        self.header.as_mut().vec.len = new_len;
+pub unsafe fn extend_from_slice_assuming_capacity<T: Clone>(data: *mut T, vec: &mut VecHeader, slice: &[T])
+where
+    T: Clone,
+{
+    let len = slice.len() as u32;
+    debug_assert!(len <= vec.remaining_capacity());
+
+    let inital_len = vec.len;
+
+    let mut ptr = data.add(inital_len as usize);
+
+    for item in slice {
+        ptr::write(ptr, item.clone());
+        ptr = ptr.add(1)
     }
 
-    pub unsafe fn try_push(&mut self, val: T) -> Result<(), AllocError> {
-        debug_assert!(self.is_unique());
-        let header = self.header.as_mut();
-        let len = header.vec.len;
-        if len >= header.vec.cap {
-            return Err(capacity_error());
+    vec.len += len;
+}
+
+// Returns true if the iterator was emptied.
+pub unsafe fn extend_within_capacity<T, I: Iterator<Item = T>>(data: *mut T, vec: &mut VecHeader, iter: &mut I) -> bool {
+    let inital_len = vec.len;
+
+    let mut ptr = data.add(inital_len as usize);
+
+    let mut count = 0;
+    let max = vec.remaining_capacity();
+    let mut finished = false;
+    loop {
+        if count == max {
+            break;
         }
-
-        let address = self.data_ptr().add(len as usize);
-        header.vec.len += 1;
-
-        ptr::write(address, val);
-
-        Ok(())
-    }
-
-    // SAFETY: The capacity MUST be ensured beforehand.
-    // The inline annotation really helps here.
-    #[inline]
-    pub unsafe fn push(&mut self, val: T) {
-        debug_assert!(self.is_unique());
-        let header = self.header.as_mut();
-        let len = header.vec.len;
-        header.vec.len += 1;
-
-        let address = self.data_ptr().add(len as usize);
-        ptr::write(address, val);
-    }
-
-    #[inline]
-    pub unsafe fn pop(&mut self) -> Option<T> {
-        debug_assert!(self.is_unique());
-        let header = self.header.as_mut();
-        let len = header.vec.len;
-        if len == 0 {
-            return None;
-        }
-
-        let new_len = len - 1;
-        header.vec.len = new_len;
-
-        let popped = ptr::read(self.data_ptr().add(new_len as usize));
-
-        Some(popped)
-    }
-
-    pub unsafe fn try_extend_from_slice(&mut self, data: &[T]) -> Result<(), AllocError>
-    where
-        T: Clone,
-        R: RefCount,
-    {
-        debug_assert!(self.is_unique());
-        if data.len() > self.remaining_capacity() as usize {
-            return Err(capacity_error());
-        }
-
-        let header = self.header.as_mut();
-        let inital_len = header.vec.len;
-        header.vec.len = inital_len + data.len() as BufferSize;
-
-        let mut ptr = self.data_ptr().add(inital_len as usize);
-
-        for item in data {
-            ptr::write(ptr, item.clone());
-            ptr = ptr.add(1)
-        }
-
-        Ok(())
-    }
-
-    pub unsafe fn try_extend(
-        &mut self,
-        iter: &mut impl Iterator<Item = T>,
-    ) -> Result<(), AllocError> {
-        debug_assert!(self.is_unique());
-        let (min_len, _upper_bound) = iter.size_hint();
-        if min_len > self.remaining_capacity() as usize {
-            return Err(capacity_error());
-        }
-
-        if min_len > 0 {
-            self.extend_n(iter, min_len as BufferSize);
-        }
-
-        for item in iter {
-            self.try_push(item)?;
-        }
-
-        Ok(())
-    }
-
-    pub unsafe fn extend_n(&mut self, iter: &mut impl Iterator<Item = T>, n: BufferSize) {
-        debug_assert!(self.is_unique());
-        let header = self.header.as_mut();
-        let initial_len = header.vec.len;
-
-        let mut ptr = self.data_ptr().add(initial_len as usize);
-        let mut count = 0;
-        for item in iter {
-            if count == n {
-                break;
-            }
+        if let Some(item) = iter.next() {
             ptr::write(ptr, item);
             ptr = ptr.add(1);
-            count += 1;
-        }
-
-        header.vec.len = initial_len + count;
-    }
-
-    pub unsafe fn clear(&mut self) {
-        debug_assert!(self.is_unique());
-        unsafe {
-            let len = self.header.as_ref().vec.len;
-            drop_items(data_ptr::<Header<R, A>, T>(self.header), len);
-            self.header.as_mut().vec.len = 0;
+            count += 1;    
+        } else {
+            finished = true;
+            break;
         }
     }
 
-    pub unsafe fn move_data(&mut self, dst_buffer: &mut Self) {
-        debug_assert!(self.is_unique());
-        debug_assert!(dst_buffer.remaining_capacity() >= self.len());
-        let src_header = self.header.as_mut();
-        let dst_header = dst_buffer.header.as_mut();
-        let len = src_header.vec.len;
-        if len > 0 {
-            unsafe {
-                let src = self.data_ptr();
-                let dst = dst_buffer.data_ptr().add(dst_header.vec.len as usize);
+    vec.len += count;
+    return finished;
+}
 
-                let inital_dst_len = dst_header.vec.len;
-                dst_header.vec.len = inital_dst_len + len;
-                src_header.vec.len = 0;
-
-                ptr::copy_nonoverlapping(src, dst, len as usize);
-            }
-        }
+#[inline]
+pub unsafe fn pop<T>(data: *mut T, vec: &mut VecHeader) -> Option<T> {
+    if vec.len == 0 {
+        return None;
     }
+
+    vec.len -= 1;
+
+    Some(ptr::read(data.add(vec.len as usize)))
+}
+
+#[inline(always)]
+pub unsafe fn push_assuming_capacity<T>(data: *mut T, vec: &mut VecHeader, val: T) {
+    let dst = data.add(vec.len as usize);
+    ptr::write(dst, val);
+    vec.len += 1;
+}
+
+pub unsafe fn clear<T>(data: *mut T, vec: &mut VecHeader) {
+    drop_items(data, vec.len);
+    vec.len = 0;
 }
 
 pub fn assert_ref_count_layout<R>() {
@@ -516,7 +276,7 @@ where
     }
 
     if cap > BufferSize::MAX as usize {
-        return Err(capacity_error());
+        return Err(alloc_error_cold());
     }
 
     let layout = buffer_layout::<Header<DefaultRefCount, A>, T>(cap)?;
@@ -534,23 +294,6 @@ where
 
 pub unsafe fn header_from_data_ptr<H, T>(data_ptr: NonNull<T>) -> NonNull<H> {
     NonNull::new_unchecked((data_ptr.as_ptr() as *mut u8).sub(header_size::<H, T>()) as *mut H)
-}
-
-impl<T, R: RefCount, A: Allocator> Drop for HeaderBuffer<T, R, A> {
-    fn drop(&mut self) {
-        unsafe {
-            if self.header.as_ref().ref_count.release_ref() {
-                let cap = self.capacity();
-                // See the implementation of std Arc for the need to use this fence. Note that
-                // we only need it for the atomic reference counted version but I don't expect
-                // this to make a measurable difference.
-                core::sync::atomic::fence(Acquire);
-                let len = self.header.as_ref().vec.len;
-                drop_items(data_ptr::<Header<R, A>, T>(self.header), len);
-                dealloc::<T, R, A>(self.header, cap);
-            }
-        }
-    }
 }
 
 #[test]

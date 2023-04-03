@@ -93,7 +93,7 @@ impl<T> Drop for Drain<'_, T> {
                             let dst = source_vec.as_mut_ptr().add(start);
                             ptr::copy(src, dst, self.0.tail_len);
                         }
-                        source_vec.len = (start + self.0.tail_len) as u32;
+                        source_vec.header.len = (start + self.0.tail_len) as u32;
                     }
                 }
             }

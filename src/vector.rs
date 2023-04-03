@@ -2,12 +2,12 @@ use core::fmt::Debug;
 use core::ops::{Deref, DerefMut, Index, IndexMut};
 use core::ptr::NonNull;
 use core::{mem, ptr};
-use std::ops::RangeBounds;
+use core::ops::RangeBounds;
 
 use crate::alloc::{AllocError, Allocator, Global};
 use crate::drain::Drain;
 use crate::raw::{
-    self, buffer_layout, AtomicRefCount, BufferSize, Header, HeaderBuffer, RefCount, VecHeader,
+    self, buffer_layout, AtomicRefCount, BufferSize, Header, HeaderBuffer, RefCount, VecHeader, move_data,
 };
 use crate::shared::{AtomicSharedVector, SharedVector};
 use crate::splice::Splice;
@@ -36,14 +36,13 @@ use crate::{grow_amortized, DefaultRefCount};
 /// in each of the internally managed vectors.
 pub struct RawVector<T> {
     pub(crate) data: NonNull<T>,
-    pub(crate) len: BufferSize,
-    pub(crate) cap: BufferSize,
+    pub(crate) header: VecHeader,
 }
 
 impl<T> RawVector<T> {
     /// Creates an empty, unallocated raw vector.
     pub fn new() -> Self {
-        RawVector { data: NonNull::dangling(), len: 0, cap: 0 }
+        RawVector { data: NonNull::dangling(), header: VecHeader { len: 0, cap: 0 } }
     }
 
     /// Creates an empty pre-allocated vector with a given storage capacity.
@@ -61,8 +60,7 @@ impl<T> RawVector<T> {
             ));
             Ok(RawVector {
                 data,
-                len: 0,
-                cap: cap as BufferSize,
+                header: VecHeader { cap: cap as BufferSize, len: 0 },
             })
         }
     }
@@ -108,7 +106,7 @@ impl<T> RawVector<T> {
     ///
     /// The provided allocator must be the one this raw vector was created with.
     pub unsafe fn deallocate<A: Allocator>(&mut self, allocator: &A) {
-        if self.cap == 0 {
+        if self.header.cap == 0 {
             return;
         }
 
@@ -117,32 +115,32 @@ impl<T> RawVector<T> {
         self.deallocate_buffer(allocator);
 
         self.data = NonNull::dangling();
-        self.cap = 0;
-        self.len = 0;
+        self.header.cap = 0;
+        self.header.len = 0;
     }
 
     #[inline]
     /// Returns `true` if the vector contains no elements.
     pub fn is_empty(&self) -> bool {
-        self.len == 0
+        self.header.len == 0
     }
 
     #[inline]
     /// Returns the number of elements in the vector, also referred to as its ‘length’.
     pub fn len(&self) -> usize {
-        self.len as usize
+        self.header.len as usize
     }
 
     #[inline]
     /// Returns the total number of elements the vector can hold without reallocating.
     pub fn capacity(&self) -> usize {
-        self.cap as usize
+        self.header.cap as usize
     }
 
     /// Returns number of elements that can be added without reallocating.
     #[inline]
     pub fn remaining_capacity(&self) -> usize {
-        (self.cap - self.len) as usize
+        (self.header.cap - self.header.len) as usize
     }
 
     #[inline]
@@ -163,13 +161,12 @@ impl<T> RawVector<T> {
     /// Clears the vector, removing all values.
     pub fn clear(&mut self) {
         unsafe {
-            raw::drop_items(self.data_ptr(), self.len);
-            self.len = 0;
+            raw::clear(self.data_ptr(), &mut self.header)
         }
     }
 
     unsafe fn base_ptr<A: Allocator>(&self, _allocator: &A) -> NonNull<u8> {
-        debug_assert!(self.cap > 0);
+        debug_assert!(self.header.cap > 0);
         raw::header_from_data_ptr::<Header<DefaultRefCount, A>, T>(self.data).cast()
     }
 
@@ -184,17 +181,11 @@ impl<T> RawVector<T> {
     /// Panics if the new capacity exceeds `u32::MAX` bytes.
     #[inline]
     pub unsafe fn push<A: Allocator>(&mut self, allocator: &A, val: T) {
-        let len = self.len;
-        let cap = self.cap;
-        if cap == len {
+        if self.header.len == self.header.cap {
             self.try_realloc_additional(allocator, 1).unwrap();
         }
 
-        unsafe {
-            self.len += 1;
-            let dst = self.data_ptr().add(len as usize);
-            ptr::write(dst, val);
-        }
+        raw::push_assuming_capacity(self.data_ptr(), &mut self.header, val);
     }
 
     /// Appends an element if there is sufficient spare capacity, otherwise an error is returned
@@ -204,13 +195,13 @@ impl<T> RawVector<T> {
     /// The caller should use reserve or try_reserve to ensure that there is enough capacity.
     #[inline]
     pub fn push_within_capacity(&mut self, val: T) -> Result<(), T> {
-        if self.len == self.cap {
+        if self.header.len == self.header.cap {
             return Err(val);
         }
 
         unsafe {
-            let dst = self.data_ptr().add(self.len as usize);
-            self.len += 1;
+            let dst = self.data_ptr().add(self.header.len as usize);
+            self.header.len += 1;
             ptr::write(dst, val);
         }
 
@@ -220,13 +211,9 @@ impl<T> RawVector<T> {
     /// Removes the last element from the vector and returns it, or `None` if it is empty.
     #[inline]
     pub fn pop(&mut self) -> Option<T> {
-        if self.len == 0 {
-            return None;
+        unsafe {
+            raw::pop(self.data_ptr(), &mut self.header)
         }
-
-        self.len -= 1;
-
-        unsafe { Some(ptr::read(self.data_ptr().add(self.len as usize))) }
     }
 
     /// Removes and returns the element at position `index` within the vector,
@@ -261,7 +248,7 @@ impl<T> RawVector<T> {
                 // Shift everything down to fill in that spot.
                 ptr::copy(ptr.add(1), ptr, len - index - 1);
             }
-            self.len = len as u32 - 1;
+            self.header.len = len as u32 - 1;
             ret
         }
     }
@@ -288,7 +275,7 @@ impl<T> RawVector<T> {
                 ptr::write(ptr, ptr::read(last_ptr));
             }
 
-            self.len -= 1;
+            self.header.len -= 1;
 
             item
         }
@@ -309,7 +296,7 @@ impl<T> RawVector<T> {
 
         unsafe {
             // space for the new element
-            if self.len == self.cap {
+            if self.header.len == self.header.cap {
                 self.try_reserve(allocator, 1).unwrap();
             }
 
@@ -332,7 +319,7 @@ impl<T> RawVector<T> {
                 // element.
                 ptr::write(p, element);
             }
-            self.len += 1;
+            self.header.len += 1;
         }
     }
 
@@ -341,11 +328,14 @@ impl<T> RawVector<T> {
     /// # Safety
     ///
     /// The provided allocator must be the one this raw vector was created with.
-    pub unsafe fn extend_from_slice<A: Allocator>(&mut self, allocator: &A, data: &[T])
+    pub unsafe fn extend_from_slice<A: Allocator>(&mut self, allocator: &A, slice: &[T])
     where
         T: Clone,
     {
-        self.extend(allocator, data.iter().cloned())
+        self.try_reserve(allocator, slice.len()).unwrap();
+        unsafe {
+            raw::extend_from_slice_assuming_capacity(self.data_ptr(), &mut self.header, slice);
+        }
     }
 
     /// Moves all the elements of `other` into `self`, leaving `other` empty.
@@ -364,11 +354,7 @@ impl<T> RawVector<T> {
         self.try_reserve(allocator, other.len()).unwrap();
 
         unsafe {
-            let src = other.data_ptr();
-            let dst = self.data_ptr().add(self.len());
-            ptr::copy_nonoverlapping(src, dst, other.len());
-            self.len += other.len;
-            other.len = 0
+            move_data(other.data_ptr(), &mut other.header, self.data_ptr(), &mut self.header);
         }
     }
 
@@ -405,7 +391,7 @@ impl<T> RawVector<T> {
                 ptr = ptr.add(1);
                 count += 1;
             }
-            self.len += count;
+            self.header.len += count;
         }
     }
 
@@ -435,18 +421,9 @@ impl<T> RawVector<T> {
     {
         let mut clone =
             Self::try_with_capacity(allocator, cap.max(self.len())).unwrap();
-        let len = self.len;
 
         unsafe {
-            let mut src = self.data_ptr();
-            let mut dst = clone.data_ptr();
-            for _ in 0..len {
-                ptr::write(dst, (*src).clone());
-                src = src.add(1);
-                dst = dst.add(1);
-            }
-
-            clone.len = len;
+            raw::extend_from_slice_assuming_capacity(clone.data_ptr(), &mut clone.header, self.as_slice());
         }
 
         clone
@@ -474,7 +451,7 @@ impl<T> RawVector<T> {
 
             let new_layout = buffer_layout::<Header<R, A>, T>(new_cap).unwrap();
 
-            let new_alloc = if self.cap == 0 {
+            let new_alloc = if self.header.cap == 0 {
                 allocator.allocate(new_layout)?
             } else {
                 let old_cap = self.capacity();
@@ -491,7 +468,7 @@ impl<T> RawVector<T> {
 
             let new_data_ptr = crate::raw::data_ptr::<Header<R, A>, T>(new_alloc.cast());
             self.data = NonNull::new_unchecked(new_data_ptr);
-            self.cap = new_cap as u32;
+            self.header.cap = new_cap as u32;
         }
 
         Ok(())
@@ -504,8 +481,8 @@ impl<T> RawVector<T> {
 
         allocator.deallocate(ptr, layout);
 
-        self.cap = 0;
-        self.len = 0;
+        self.header.cap = 0;
+        self.header.len = 0;
         self.data = NonNull::dangling();
     }
 
@@ -625,7 +602,7 @@ impl<T> RawVector<T> {
 
         unsafe {
             // Set self.vec length's to start, to be safe in case Drain is leaked
-            self.len = start as u32;
+            self.header.len = start as u32;
             let range_slice = core::slice::from_raw_parts(self.as_ptr().add(start), end - start);
             Drain {
                 tail_start: end,
@@ -702,7 +679,7 @@ impl<T> RawVector<T> {
         let original_len = self.len();
         // Avoid double drop if the drop guard is not executed,
         // since we may make some holes during the process.
-        self.len = 0;
+        self.header.len = 0;
 
         // Vec: [Kept, Kept, Hole, Hole, Hole, Hole, Unchecked, Unchecked]
         //      |<-              processed len   ->| ^- next to check
@@ -735,7 +712,7 @@ impl<T> RawVector<T> {
                     }
                 }
                 // SAFETY: After filling holes, all items are in contiguous memory.
-                self.v.len = (self.original_len - self.deleted_cnt) as u32;
+                self.v.header.len = (self.original_len - self.deleted_cnt) as u32;
             }
         }
 
@@ -789,7 +766,7 @@ impl<T> RawVector<T> {
     /// Transfers ownership of this raw vector's contents to the one that is returned, and leaves
     /// this one empty and unallocated.
     pub fn take(&mut self) -> Self {
-        std::mem::replace(self, RawVector::new())
+        mem::replace(self, RawVector::new())
     }
 }
 
@@ -1017,21 +994,23 @@ impl<T, A: Allocator> Vector<T, A> {
 
     /// Clears the vector, removing all values.
     pub fn clear(&mut self) {
-        self.raw.clear()
+        unsafe {
+            raw::clear(self.raw.data_ptr(), &mut self.raw.header)
+        }
     }
 
     unsafe fn into_header_buffer<R>(mut self) -> HeaderBuffer<T, R, A>
     where
         R: RefCount,
     {
-        debug_assert!(self.raw.cap != 0);
+        debug_assert!(self.raw.header.cap != 0);
         unsafe {
             let mut header = raw::header_from_data_ptr(self.raw.data);
 
             *header.as_mut() = raw::Header {
                 vec: VecHeader {
-                    len: self.raw.len,
-                    cap: self.raw.cap,
+                    len: self.raw.header.len,
+                    cap: self.raw.header.cap,
                 },
                 ref_count: R::new(1),
                 allocator: ptr::read(&mut self.allocator),
@@ -1052,7 +1031,7 @@ impl<T, A: Allocator> Vector<T, A> {
     where
         A: Allocator + Clone,
     {
-        if self.raw.cap == 0 {
+        if self.raw.header.cap == 0 {
             return SharedVector::try_with_capacity_in(0, self.allocator.clone()).unwrap();
         }
         unsafe {
@@ -1070,7 +1049,7 @@ impl<T, A: Allocator> Vector<T, A> {
     where
         A: Allocator + Clone,
     {
-        if self.raw.cap == 0 {
+        if self.raw.header.cap == 0 {
             return AtomicSharedVector::try_with_capacity_in(0, self.allocator.clone()).unwrap();
         }
         unsafe {

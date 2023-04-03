@@ -101,7 +101,7 @@ impl<T> Drain<'_, T> {
     /// Returns `true` if we filled the entire range. (`replace_with.next()` didn’t return `None`.)
     unsafe fn fill<I: Iterator<Item = T>>(&mut self, replace_with: &mut I) -> bool {
         let vec = unsafe { self.vec.as_mut() };
-        let range_start = vec.len as usize;
+        let range_start = vec.header.len as usize;
         let range_end = self.tail_start as usize;
         let range_slice = unsafe {
             slice::from_raw_parts_mut(vec.as_mut_ptr().add(range_start), range_end - range_start)
@@ -110,7 +110,7 @@ impl<T> Drain<'_, T> {
         for place in range_slice {
             if let Some(new_item) = replace_with.next() {
                 unsafe { ptr::write(place, new_item) };
-                vec.len += 1;
+                vec.header.len += 1;
             } else {
                 return false;
             }

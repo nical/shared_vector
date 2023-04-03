@@ -2,7 +2,9 @@ use core::fmt::Debug;
 use core::ops::{Deref, DerefMut, Index, IndexMut};
 use core::ptr::NonNull;
 use core::{mem, ptr};
+use core::sync::atomic::Ordering;
 
+use crate::raw;
 use crate::alloc::{AllocError, Allocator, Global};
 use crate::raw::{BufferSize, HeaderBuffer};
 use crate::vector::{Vector, RawVector};
@@ -46,28 +48,22 @@ impl<T, R: RefCount> RefCountedVector<T, R, Global> {
     /// Creates an empty shared buffer without allocating memory.
     #[inline]
     pub fn new() -> RefCountedVector<T, R, Global> {
-        RefCountedVector {
-            inner: HeaderBuffer::try_with_capacity(0, Global).unwrap(),
-        }
+        Self::try_with_capacity_in(0, Global).unwrap()
     }
 
     /// Constructs a new, empty vector with at least the specified capacity.
     #[inline]
     pub fn with_capacity(cap: usize) -> RefCountedVector<T, R, Global> {
-        RefCountedVector {
-            inner: HeaderBuffer::try_with_capacity(cap, Global).unwrap(),
-        }
+        Self::try_with_capacity_in(cap, Global).unwrap()
     }
 
     /// Clones the contents of a slice into a new vector.
     #[inline]
-    pub fn from_slice(data: &[T]) -> RefCountedVector<T, R, Global>
+    pub fn from_slice(slice: &[T]) -> RefCountedVector<T, R, Global>
     where
         T: Clone,
     {
-        RefCountedVector {
-            inner: HeaderBuffer::try_from_slice(data, None, Global).unwrap(),
-        }
+        Self::try_from_slice_in(slice, Global).unwrap()
     }
 }
 
@@ -85,33 +81,61 @@ impl<T, R: RefCount, A: Allocator> RefCountedVector<T, R, A> {
     /// Tries to construct a new, empty vector with at least the specified capacity.
     #[inline]
     pub fn try_with_capacity_in(cap: usize, allocator: A) -> Result<Self, AllocError> {
-        Ok(RefCountedVector {
-            inner: HeaderBuffer::try_with_capacity(cap, allocator)?,
-        })
+        raw::assert_ref_count_layout::<R>();
+        unsafe {
+            let (ptr, cap) = raw::allocate_header_buffer::<T, A>(cap, &allocator)?;
+
+            ptr::write(
+                ptr.cast().as_ptr(),
+                raw::Header {
+                    vec: raw::VecHeader {
+                        cap: cap as BufferSize,
+                        len: 0,
+                    },
+                    ref_count: R::new(1),
+                    allocator,
+                },
+            );
+
+            Ok(RefCountedVector {
+                inner: HeaderBuffer::from_raw(ptr.cast()),
+            })
+            }
+    }
+
+    pub fn try_from_slice_in(slice: &[T], allocator: A) -> Result<Self, AllocError> where T: Clone {
+        let mut v = Self::try_with_capacity_in(slice.len(), allocator)?;
+
+        unsafe {
+            raw::extend_from_slice_assuming_capacity(v.data_ptr(), v.vec_header_mut(), slice);
+        }
+
+        Ok(v)
     }
 
     /// Returns `true` if the vector contains no elements.
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.inner.is_empty()
+        self.vec_header().len == 0
     }
 
     /// Returns the number of elements in the vector, also referred to as its ‘length’.
     #[inline]
     pub fn len(&self) -> usize {
-        self.inner.len() as usize
+        self.vec_header().len as usize
     }
 
     /// Returns the total number of elements the vector can hold without reallocating.
     #[inline]
     pub fn capacity(&self) -> usize {
-        self.inner.capacity() as usize
+        self.vec_header().cap as usize
     }
 
     /// Returns number of elements that can be added without reallocating.
     #[inline]
     pub fn remaining_capacity(&self) -> usize {
-        self.inner.remaining_capacity() as usize
+        let h = self.vec_header();
+        (h.cap - h.len) as usize
     }
 
     /// Returns a reference to the underlying allocator.
@@ -124,15 +148,20 @@ impl<T, R: RefCount, A: Allocator> RefCountedVector<T, R, A> {
     /// Equivalent to `Clone::clone`.
     #[inline]
     pub fn new_ref(&self) -> Self {
-        RefCountedVector {
-            inner: self.inner.new_ref(),
+        unsafe {
+            self.inner.as_ref().ref_count.add_ref();
+            RefCountedVector {
+                inner: HeaderBuffer::from_raw(self.inner.header)
+            }
         }
     }
 
     /// Extracts a slice containing the entire vector.
     #[inline]
     pub fn as_slice(&self) -> &[T] {
-        self.inner.as_slice()
+        unsafe {
+            core::slice::from_raw_parts(self.data_ptr(), self.len())
+        }
     }
 
     /// Returns true if this is the only existing handle to the buffer.
@@ -141,7 +170,7 @@ impl<T, R: RefCount, A: Allocator> RefCountedVector<T, R, A> {
     /// is very fast (does not involve additional memory allocations or copies).
     #[inline]
     pub fn is_unique(&self) -> bool {
-        self.inner.is_unique()
+        unsafe { self.inner.as_ref().ref_count.get() == 1 }
     }
 
     /// Clears the vector, removing all values.
@@ -151,7 +180,7 @@ impl<T, R: RefCount, A: Allocator> RefCountedVector<T, R, A> {
     {
         if self.is_unique() {
             unsafe {
-                self.inner.clear();
+                raw::clear(self.data_ptr(), self.vec_header_mut());
             }
             return;
         }
@@ -162,7 +191,7 @@ impl<T, R: RefCount, A: Allocator> RefCountedVector<T, R, A> {
 
     /// Returns true if the two vectors share the same underlying storage.
     pub fn ptr_eq(&self, other: &Self) -> bool {
-        self.inner.ptr_eq(&other.inner)
+        self.inner.header == other.inner.header
     }
 
     /// Allocates a duplicate of this buffer (infallible).
@@ -171,9 +200,7 @@ impl<T, R: RefCount, A: Allocator> RefCountedVector<T, R, A> {
         T: Copy,
         A: Clone,
     {
-        RefCountedVector {
-            inner: self.inner.try_copy_buffer(None).unwrap(),
-        }
+        self.try_copy_buffer().unwrap()
     }
 
     /// Tries to allocate a duplicate of this buffer.
@@ -182,15 +209,39 @@ impl<T, R: RefCount, A: Allocator> RefCountedVector<T, R, A> {
         T: Copy,
         A: Clone,
     {
-        Ok(RefCountedVector {
-            inner: self.inner.try_copy_buffer(None)?,
-        })
+        unsafe {
+            let header = self.inner.as_ref();
+            let len = header.vec.len;
+            let cap = header.vec.cap;
+
+            if len > cap {
+                return Err(AllocError);
+            }
+
+            let allocator = header.allocator.clone();
+            let mut clone = Self::try_with_capacity_in(cap as usize, allocator)?;
+
+            if len > 0 {
+                core::ptr::copy_nonoverlapping(self.data_ptr(), clone.data_ptr(), len as usize);
+                clone.vec_header_mut().len = len;
+            }
+
+            Ok(clone)
+        }
     }
 
+    #[inline]
+    pub fn data_ptr(&self) -> *mut T {
+        unsafe { (self.inner.as_ptr() as *mut u8).add(raw::header_size::<raw::Header<R, A>, T>()) as *mut T }
+    }
 
-    #[allow(unused)]
-    pub(crate) fn addr(&self) -> *const u8 {
-        self.inner.header.as_ptr() as *const u8
+    // SAFETY: call this only if the vector is unique.
+    pub(crate) unsafe fn vec_header_mut(&mut self) -> &mut raw::VecHeader {
+        &mut self.inner.as_mut().vec
+    } 
+
+    pub(crate) fn vec_header(&self) -> &raw::VecHeader {
+        unsafe { &self.inner.as_ref().vec }
     }
 }
 
@@ -203,18 +254,16 @@ impl<T: Clone, R: RefCount, A: Allocator + Clone> RefCountedVector<T, R, A> {
         self.ensure_unique();
 
         unsafe {
-            let data = NonNull::new_unchecked(self.inner.data_ptr());
-            let len = self.len() as BufferSize;
-            let cap = self.capacity() as BufferSize;
-            let allocator = self.inner.header.as_ref().allocator.clone();
+            let data = NonNull::new_unchecked(self.data_ptr());
+            let header = self.vec_header().clone();
+            let allocator = self.inner.as_ref().allocator.clone();
 
             mem::forget(self);
 
             Vector {
                 raw: RawVector {
                     data,
-                    len,
-                    cap,
+                    header,
                 },
                 allocator,
             }
@@ -229,14 +278,17 @@ impl<T: Clone, R: RefCount, A: Allocator + Clone> RefCountedVector<T, R, A> {
     pub fn push(&mut self, val: T) {
         self.reserve(1);
         unsafe {
-            self.inner.push(val);
+            raw::push_assuming_capacity(self.data_ptr(), &mut self.vec_header_mut(), val);
         }
     }
 
     /// Removes the last element from the vector and returns it, or `None` if it is empty.
     pub fn pop(&mut self) -> Option<T> {
         self.ensure_unique();
-        unsafe { self.inner.pop() }
+
+        unsafe {
+            raw::pop(self.data_ptr(), &mut self.vec_header_mut())
+        }
     }
 
     /// Removes an element from the vector and returns it.
@@ -254,16 +306,17 @@ impl<T: Clone, R: RefCount, A: Allocator + Clone> RefCountedVector<T, R, A> {
         assert!(idx < len);
 
         unsafe {
-            let ptr = self.inner.data_ptr().add(idx);
+            let data_ptr = self.data_ptr();
+            let ptr = data_ptr.add(idx);
             let item = ptr::read(ptr);
 
             let last_idx = len - 1;
             if idx != last_idx {
-                let last_ptr = self.inner.data_ptr().add(last_idx);
+                let last_ptr = data_ptr.add(last_idx);
                 ptr::write(ptr, ptr::read(last_ptr));
             }
 
-            self.inner.set_len(last_idx as BufferSize);
+            self.vec_header_mut().len = last_idx as BufferSize;
 
             item
         }
@@ -273,7 +326,7 @@ impl<T: Clone, R: RefCount, A: Allocator + Clone> RefCountedVector<T, R, A> {
     /// with the element.
     ///
     /// Like other mutable operations, this method may reallocate if the vector is not unique.
-    /// Hopwever it will not reallocate when there’s insufficient capacity.
+    /// However it will not reallocate when there’s insufficient capacity.
     /// The caller should use reserve or try_reserve to ensure that there is enough capacity.
     pub fn push_within_capacity(&mut self, val: T) -> Result<(), T> {
         if self.remaining_capacity() == 0 {
@@ -282,27 +335,35 @@ impl<T: Clone, R: RefCount, A: Allocator + Clone> RefCountedVector<T, R, A> {
 
         self.ensure_unique();
         unsafe {
-            self.inner.push(val);
+            raw::push_assuming_capacity(self.data_ptr(), &mut self.vec_header_mut(), val);
         }
 
         Ok(())
     }
 
     /// Clones and appends the contents of the slice to the back of a collection.
-    pub fn extend_from_slice(&mut self, data: &[T]) {
-        self.reserve(data.len());
+    pub fn extend_from_slice(&mut self, slice: &[T]) {
+        self.reserve(slice.len());
         unsafe {
-            self.inner.try_extend_from_slice(data).unwrap();
+            raw::extend_from_slice_assuming_capacity(self.data_ptr(), self.vec_header_mut(), slice);
         }
     }
 
     /// Appends the contents of an iterator to the back of a collection.
     pub fn extend(&mut self, data: impl IntoIterator<Item = T>) {
         let mut iter = data.into_iter();
+
         let (min, max) = iter.size_hint();
         self.reserve(max.unwrap_or(min));
+
         unsafe {
-            self.inner.try_extend(&mut iter).unwrap();
+            if raw::extend_within_capacity(self.data_ptr(), self.vec_header_mut(), &mut iter) {
+                return;
+            }
+        }
+
+        for item in iter {
+            self.push(item);
         }
     }
 
@@ -316,7 +377,7 @@ impl<T: Clone, R: RefCount, A: Allocator + Clone> RefCountedVector<T, R, A> {
     #[inline]
     pub fn ensure_unique(&mut self) {
         if !self.is_unique() {
-            self.inner = self.inner.try_clone_buffer(None).unwrap();
+            *self = self.try_clone_buffer(None).unwrap();
         }
     }
 
@@ -331,7 +392,9 @@ impl<T: Clone, R: RefCount, A: Allocator + Clone> RefCountedVector<T, R, A> {
         A: Clone,
     {
         self.ensure_unique();
-        self.inner.as_mut_slice()
+        unsafe {
+            core::slice::from_raw_parts_mut(self.data_ptr(), self.len())
+        }
     }
 
     /// Allocates a duplicate of this buffer (infallible).
@@ -340,8 +403,37 @@ impl<T: Clone, R: RefCount, A: Allocator + Clone> RefCountedVector<T, R, A> {
         T: Clone,
         A: Clone,
     {
-        RefCountedVector {
-            inner: self.inner.try_clone_buffer(None).unwrap(),
+        self.try_clone_buffer(None).unwrap()
+    }
+
+    fn try_clone_buffer(&self, new_cap: Option<BufferSize>) -> Result<Self, AllocError>
+    where
+        T: Clone,
+        A: Clone,
+    {
+        unsafe {
+            let header = self.inner.as_ref();
+            let len = header.vec.len;
+            let cap = if let Some(cap) = new_cap {
+                cap
+            } else {
+                header.vec.cap
+            };
+            let allocator = header.allocator.clone();
+
+            if len > cap {
+                return Err(AllocError);
+            }
+
+            let mut clone = Self::try_with_capacity_in(cap as usize, allocator)?;
+
+            raw::extend_from_slice_assuming_capacity(
+                clone.data_ptr(),
+                clone.vec_header_mut(),
+                self.as_slice()
+            );
+
+            Ok(clone)
         }
     }
 
@@ -446,10 +538,14 @@ impl<T: Clone, R: RefCount, A: Allocator + Clone> RefCountedVector<T, R, A> {
         unsafe {
             if other.is_unique() {
                 // Fast path: memcpy
-                other.inner.move_data(&mut self.inner);
+                raw::move_data(
+                     other.data_ptr(), &mut other.inner.header.as_mut().vec,
+                     self.data_ptr(), &mut self.inner.as_mut().vec,
+                )
             } else {
                 // Slow path, clone each item.
-                self.inner.try_extend_from_slice(other.as_slice()).unwrap();
+                raw::extend_from_slice_assuming_capacity(self.data_ptr(), self.vec_header_mut(), other.as_slice());
+
                 *other =
                     Self::try_with_capacity_in(other.capacity(), self.inner.allocator().clone())
                         .unwrap();
@@ -499,7 +595,7 @@ impl<T: Clone, R: RefCount, A: Allocator + Clone> RefCountedVector<T, R, A> {
                 }?;
 
                 self.inner.header = new_alloc.cast();
-                self.inner.header.as_mut().vec.cap = new_cap as BufferSize;
+                self.inner.as_mut().vec.cap = new_cap as BufferSize;
 
                 return Ok(());
             }
@@ -507,7 +603,10 @@ impl<T: Clone, R: RefCount, A: Allocator + Clone> RefCountedVector<T, R, A> {
 
         // The slowest path, we pay for both the new allocation and the need to clone
         // each item one by one.
-        self.inner = HeaderBuffer::try_from_slice(self.as_slice(), Some(new_cap), allocator)?;
+        let mut new_vec = Self::try_with_capacity_in(new_cap, allocator)?;
+        new_vec.extend_from_slice(self.as_slice());
+
+        mem::swap(self, &mut new_vec);
 
         Ok(())
     }
@@ -523,6 +622,23 @@ impl<T: Clone, R: RefCount, A: Allocator + Clone> RefCountedVector<T, R, A> {
         self.append(&mut other);
 
         self
+    }
+}
+
+impl<T, R: RefCount, A: Allocator> Drop for RefCountedVector<T, R, A> {
+    fn drop(&mut self) {
+        unsafe {
+            if self.inner.as_ref().ref_count.release_ref() {
+                let header = self.vec_header().clone();
+                // See the implementation of std Arc for the need to use this fence. Note that
+                // we only need it for the atomic reference counted version but I don't expect
+                // this to make a measurable difference.
+                core::sync::atomic::fence(Ordering::Acquire);
+                
+                raw::drop_items(self.data_ptr(), header.len);
+                raw::dealloc::<T, R, A>(self.inner.header, header.cap);
+            }
+        }
     }
 }
 
@@ -667,6 +783,7 @@ fn basic_shared() {
         assert_eq!(b2.as_slice(), &[num(1), num(2)]);
         assert_eq!(popped, Some(num(4)));
 
+        println!("concatenate");
         let c = a.concatenate(b2);
         assert_eq!(c.as_slice(), &[num(1), num(2), num(1), num(2)]);
     }
