@@ -402,7 +402,6 @@ impl<T> RawVector<T> {
     pub fn clone_buffer<A: Allocator>(&self, allocator: &A) -> Self
     where
         T: Clone,
-        A: Clone,
     {
         self.clone_buffer_with_capacity(allocator, self.len())
     }
@@ -410,14 +409,9 @@ impl<T> RawVector<T> {
     /// Allocate a clone of this buffer with a different capacity
     ///
     /// The capacity must be at least as large as the buffer's length.
-    ///
-    /// # Safety
-    ///
-    /// The provided allocator must be the one this raw vector was created with.
     pub fn clone_buffer_with_capacity<A: Allocator>(&self, allocator: &A, cap: usize) -> Self
     where
         T: Clone,
-        A: Clone,
     {
         let mut clone =
             Self::try_with_capacity(allocator, cap.max(self.len())).unwrap();
@@ -530,8 +524,6 @@ impl<T> RawVector<T> {
     ///
     /// The provided allocator must be the one this raw vector was created with.
     pub unsafe fn shrink_to<A: Allocator>(&mut self, allocator: &A, min_capacity: usize)
-    where
-        T: Clone,
     {
         let min_capacity = min_capacity.max(self.len());
         if self.capacity() <= min_capacity {
@@ -547,8 +539,6 @@ impl<T> RawVector<T> {
     ///
     /// The provided allocator must be the one this raw vector was created with.
     pub unsafe fn shrink_to_fit<A: Allocator>(&mut self, allocator: &A)
-    where
-        T: Clone,
     {
         self.shrink_to(allocator, self.len())
     }
