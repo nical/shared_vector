@@ -772,6 +772,10 @@ impl<T: PartialEq<T>> PartialEq<&[T]> for RawVector<T> {
     }
 }
 
+impl<T: Eq> Eq for RawVector<T> {
+
+}
+
 impl<T> AsRef<[T]> for RawVector<T> {
     fn as_ref(&self) -> &[T] {
         self.as_slice()
