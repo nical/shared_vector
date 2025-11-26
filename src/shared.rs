@@ -238,7 +238,7 @@ impl<T, R: RefCount, A: Allocator> RefCountedVector<T, R, A> {
     // SAFETY: call this only if the vector is unique.
     pub(crate) unsafe fn vec_header_mut(&mut self) -> &mut raw::VecHeader {
         &mut self.inner.as_mut().vec
-    } 
+    }
 
     pub(crate) fn vec_header(&self) -> &raw::VecHeader {
         unsafe { &self.inner.as_ref().vec }
@@ -634,7 +634,7 @@ impl<T, R: RefCount, A: Allocator> Drop for RefCountedVector<T, R, A> {
                 // we only need it for the atomic reference counted version but I don't expect
                 // this to make a measurable difference.
                 core::sync::atomic::fence(Ordering::Acquire);
-                
+
                 raw::drop_items(self.data_ptr(), header.len);
                 raw::dealloc::<T, R, A>(self.inner.header, header.cap);
             }
@@ -644,6 +644,8 @@ impl<T, R: RefCount, A: Allocator> Drop for RefCountedVector<T, R, A> {
 
 
 unsafe impl<T: Sync, A: Allocator + Send> Send for AtomicSharedVector<T, A> {}
+
+unsafe impl<T: Send + Sync, A: Allocator + Sync> Sync for AtomicSharedVector<T, A> {}
 
 impl<T, R: RefCount, A: Allocator> Clone for RefCountedVector<T, R, A> {
     fn clone(&self) -> Self {

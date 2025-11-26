@@ -8,7 +8,7 @@ use core::sync::atomic::{
     Ordering::{Relaxed, Release},
 };
 
-pub use crate::alloc::{AllocError, Allocator, Global};
+pub use crate::alloc::{AllocError, Allocator};
 
 pub type BufferSize = u32;
 
@@ -224,7 +224,7 @@ pub unsafe fn extend_within_capacity<T, I: Iterator<Item = T>>(data: *mut T, vec
         if let Some(item) = iter.next() {
             ptr::write(ptr, item);
             ptr = ptr.add(1);
-            count += 1;    
+            count += 1;
         } else {
             finished = true;
             break;
@@ -298,6 +298,8 @@ pub unsafe fn header_from_data_ptr<H, T>(data_ptr: NonNull<T>) -> NonNull<H> {
 
 #[test]
 fn buffer_layout_alignemnt() {
+    pub use crate::alloc::Global;
+
     type B = Box<u32>;
     let layout = buffer_layout::<Header<DefaultRefCount, Global>, B>(2).unwrap();
     assert_eq!(layout.align(), mem::size_of::<B>());
