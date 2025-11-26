@@ -111,7 +111,7 @@ macro_rules! arc_vector {
 
 #[test]
 fn vector_macro() {
-    pub use allocator_api2::alloc::{Allocator, Global};
+    pub use allocator_api2::alloc::Global;
 
     let v1: Vector<u32> = vector![0, 1, 2, 3, 4, 5];
     let v2: Vector<u32> = vector![2; 4];
