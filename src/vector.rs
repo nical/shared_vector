@@ -437,6 +437,24 @@ impl<T> RawVector<T> {
         self.try_realloc_with_capacity(allocator, new_cap)
     }
 
+    pub fn truncate(&mut self, new_len: usize) {
+        let old_len = self.header.len as usize;
+        if old_len <= new_len {
+            return;
+        }
+
+        unsafe {
+            let mut elt = self.data_ptr().add(new_len);
+            let end = self.data_ptr().add(old_len);
+            while elt < end {
+                ptr::drop_in_place(elt);
+                elt = elt.add(1)
+            }
+        }
+
+        self.header.len = new_len as u32;
+    }
+
     #[cold]
     unsafe fn try_realloc_with_capacity<A: Allocator>(&mut self, allocator: &A, new_cap: usize) -> Result<(), AllocError> {
         type R = DefaultRefCount;
@@ -450,12 +468,7 @@ impl<T> RawVector<T> {
 
         let old_len = self.len();
         if old_len > new_cap {
-            let mut elt = self.data_ptr().add(new_cap);
-            let end = self.data_ptr().add(old_len);
-            while elt < end {
-                ptr::drop_in_place(elt);
-                elt = elt.add(1)
-            }
+            self.truncate(new_cap);
         }
 
         let new_alloc = if self.header.cap == 0 {
@@ -531,12 +544,7 @@ impl<T> RawVector<T> {
 
         let old_len = self.len();
         if old_len > new_cap {
-            let mut elt = self.data_ptr().add(new_cap);
-            let end = self.data_ptr().add(old_len);
-            while elt < end {
-                ptr::drop_in_place(elt);
-                elt = elt.add(1)
-            }
+            self.truncate(new_cap);
         }
 
         let old_cap = self.capacity();
