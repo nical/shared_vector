@@ -643,7 +643,7 @@ impl<T, R: RefCount, A: Allocator> Drop for RefCountedVector<T, R, A> {
 }
 
 
-unsafe impl<T: Sync, A: Allocator + Send> Send for AtomicSharedVector<T, A> {}
+unsafe impl<T: Send + Sync, A: Allocator + Send> Send for AtomicSharedVector<T, A> {}
 
 unsafe impl<T: Send + Sync, A: Allocator + Sync> Sync for AtomicSharedVector<T, A> {}
 
