@@ -134,7 +134,7 @@ impl<T> Drop for Drain<'_, T> {
             // a pointer with mutable provenance is necessary. Therefore we must reconstruct
             // it from the original vec but also avoid creating a &mut to the front since that could
             // invalidate raw pointers to it which some unsafe code might rely on.
-            let vec_ptr = vec.as_mut().as_mut_ptr();
+            let vec_ptr = vec.as_mut().data.as_ptr();
             let drop_offset = sub_ptr(drop_ptr, vec_ptr);
             let to_drop = ptr::slice_from_raw_parts_mut(vec_ptr.add(drop_offset), drop_len);
             ptr::drop_in_place(to_drop);
@@ -149,4 +149,3 @@ fn sub_ptr<T>(a: *const T, b: *const T) -> usize {
 }
 
 impl<T> FusedIterator for Drain<'_, T> {}
-
