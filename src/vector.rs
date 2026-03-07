@@ -378,18 +378,21 @@ impl<T> RawVector<T> {
 
     unsafe fn extend_within_capacity(&mut self, iter: &mut impl Iterator<Item = T>) {
         let n = self.remaining_capacity() as BufferSize;
+        if n == 0 {
+            return;
+        }
 
         let mut ptr = self.data_ptr().add(self.len());
         let mut count = 0;
 
         unsafe {
             for item in iter {
-                if count == n {
-                    break;
-                }
                 ptr::write(ptr, item);
                 ptr = ptr.add(1);
                 count += 1;
+                if count == n {
+                    break;
+                }
             }
             self.header.len += count;
         }
@@ -1776,4 +1779,67 @@ fn reallocate_in() {
     assert_eq!(vec.len(), 0);
     assert_eq!(vec.capacity(), 0);
     assert_eq!(Rc::strong_count(&val), 1);
+}
+
+#[test]
+fn extend_within_capacity() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    struct Foo;
+    impl Drop for Foo {
+        fn drop(&mut self) {
+            COUNTER.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    let values = [
+        Foo,
+        Foo,
+        Foo,
+        Foo,
+        Foo,
+        Foo,
+        Foo,
+        Foo,
+        Foo,
+        Foo,
+        Foo,
+        Foo,
+        Foo,
+        Foo,
+        Foo,
+        Foo,
+    ];
+
+    let n = values.len();
+    let cap;
+
+    let mut vector = RawVector::new();
+    unsafe {
+        vector.try_reserve(&Global, 4).unwrap();
+        cap = vector.capacity();
+        // What's mportant here is that we exercise the code path
+        // where we extend within a capcity that is inferior to the
+        // amount of elements that we need to push. So if the default
+        // capacity grows and this fails, just increase the number of
+        // elements in values.
+        assert!(cap < n);
+
+        let mut iter = values.into_iter();
+
+        vector.extend_within_capacity(&mut iter);
+
+        assert_eq!(COUNTER.load(Ordering::SeqCst), 0);
+    }
+
+    assert_eq!(COUNTER.load(Ordering::SeqCst), n - cap);
+
+    vector.clear();
+
+    assert_eq!(COUNTER.load(Ordering::SeqCst), n);
+
+    unsafe {
+        vector.deallocate(&Global);
+    }
 }
