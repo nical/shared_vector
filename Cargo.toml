@@ -11,7 +11,7 @@ description = "Reference counted vector data structure."
 
 [dev-dependencies]
 criterion = "0.4"
-blink-alloc = "0.2.5"
+blink-alloc = "0.4.0"
 
 [[bench]]
 name = "vector"
@@ -21,9 +21,9 @@ harness = false
 debug = true
 
 [dependencies]
-allocator-api2 = "0.2.4"
+allocator-api2 = "0.4.0"
 
 [features]
 default = ["std"]
-nightly = ["allocator-api2/nightly", "blink-alloc/nightly"]
+nightly = ["blink-alloc/nightly"]
 std = ["allocator-api2/std"]
