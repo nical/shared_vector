@@ -256,7 +256,7 @@ impl<T: Clone, R: RefCount, A: Allocator + Clone> RefCountedVector<T, R, A> {
         unsafe {
             let data = NonNull::new_unchecked(self.data_ptr());
             let header = self.vec_header().clone();
-            let allocator = self.inner.as_ref().allocator.clone();
+            let allocator = ptr::read(&self.inner.as_ref().allocator);
 
             mem::forget(self);
 
