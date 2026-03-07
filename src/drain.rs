@@ -104,17 +104,17 @@ impl<T> Drop for Drain<'_, T> {
 
         let mut vec = self.vec;
 
-        // if T::IS_ZST {
-        //     // ZSTs have no identity, so we don't need to move them around, we only need to drop the correct amount.
-        //     // this can be achieved by manipulating the Vec length instead of moving values out from `iter`.
-        //     unsafe {
-        //         let vec = vec.as_mut();
-        //         let old_len = vec.len();
-        //         vec.set_len(old_len + drop_len + self.tail_len);
-        //         vec.truncate(old_len + self.tail_len);
-        //     }
-        //     return;
-        // }
+        if mem::size_of::<T>() == 0 {
+            // ZSTs have no identity, so we don't need to move them around, we only need to drop the correct amount.
+            // this can be achieved by manipulating the Vec length instead of moving values out from `iter`.
+            unsafe {
+                let vec = vec.as_mut();
+                let old_len = vec.len();
+                vec.header.len = (old_len + drop_len + self.tail_len) as u32;
+                vec.truncate(old_len + self.tail_len);
+            }
+            return;
+        };
 
         // ensure elements are moved back into their appropriate places, even when drop_in_place panics
         let _guard = DropGuard(self);
