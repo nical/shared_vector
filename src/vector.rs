@@ -91,8 +91,8 @@ impl<T> RawVector<T> {
             for _ in 0..(n - 1) {
                 v.push(allocator, elem.clone())
             }
-    
-            v.push(allocator, elem);    
+
+            v.push(allocator, elem);
         }
 
         Ok(v)
@@ -104,7 +104,7 @@ impl<T> RawVector<T> {
     ///
     /// # Safety
     ///
-    /// The provided allocator must be the one this raw vector was created with.
+    /// The provided allocator must be the one currently used by this raw vector.
     pub unsafe fn deallocate<A: Allocator>(&mut self, allocator: &A) {
         if self.header.cap == 0 {
             return;
@@ -174,7 +174,7 @@ impl<T> RawVector<T> {
     ///
     /// # Safety
     ///
-    /// The provided allocator must be the one this raw vector was created with.
+    /// The provided allocator must be the one currently used by this raw vector.
     ///
     /// # Panics
     ///
@@ -327,7 +327,7 @@ impl<T> RawVector<T> {
     ///
     /// # Safety
     ///
-    /// The provided allocator must be the one this raw vector was created with.
+    /// The provided allocator must be the one currently used by this raw vector.
     pub unsafe fn extend_from_slice<A: Allocator>(&mut self, allocator: &A, slice: &[T])
     where
         T: Clone,
@@ -342,7 +342,7 @@ impl<T> RawVector<T> {
     ///
     /// # Safety
     ///
-    /// The provided allocator must be the one this raw vector was created with.
+    /// The provided allocator must be the one currently used by this raw vector.
     pub unsafe fn append<A: Allocator>(&mut self, allocator: &A, other: &mut Self)
     where
         T: Clone,
@@ -362,7 +362,7 @@ impl<T> RawVector<T> {
     ///
     /// # Safety
     ///
-    /// The provided allocator must be the one this raw vector was created with.
+    /// The provided allocator must be the one currently used by this raw vector.
     pub unsafe fn extend<A: Allocator>(&mut self, allocator: &A, data: impl IntoIterator<Item = T>) {
         let mut iter = data.into_iter();
         let (min, max) = iter.size_hint();
@@ -438,31 +438,126 @@ impl<T> RawVector<T> {
     unsafe fn try_realloc_with_capacity<A: Allocator>(&mut self, allocator: &A, new_cap: usize) -> Result<(), AllocError> {
         type R = DefaultRefCount;
 
-        unsafe {
-            if new_cap == 0 {
-                self.deallocate_buffer(allocator);
-            }
+        if new_cap == 0 {
+            self.deallocate(allocator);
+            return Ok(());
+        }
 
+        let new_layout = buffer_layout::<Header<R, A>, T>(new_cap).unwrap();
+
+        let old_len = self.len();
+        if old_len > new_cap {
+            let mut elt = self.data_ptr().add(new_cap);
+            let end = self.data_ptr().add(old_len);
+            while elt < end {
+                ptr::drop_in_place(elt);
+                elt = elt.add(1)
+            }
+        }
+
+        let new_alloc = if self.header.cap == 0 {
+            allocator.allocate(new_layout)
+        } else {
+            let old_cap = self.capacity();
+            let old_ptr = self.base_ptr(allocator);
+            let old_layout = buffer_layout::<Header<R, A>, T>(old_cap).unwrap();
             let new_layout = buffer_layout::<Header<R, A>, T>(new_cap).unwrap();
 
-            let new_alloc = if self.header.cap == 0 {
-                allocator.allocate(new_layout)?
+            if new_layout.size() >= old_layout.size() {
+                allocator.grow(old_ptr, old_layout, new_layout)
             } else {
-                let old_cap = self.capacity();
-                let old_ptr = self.base_ptr(allocator);
-                let old_layout = buffer_layout::<Header<R, A>, T>(old_cap).unwrap();
-                let new_layout = buffer_layout::<Header<R, A>, T>(new_cap).unwrap();
+                allocator.shrink(old_ptr, old_layout, new_layout)
+            }
+        };
 
-                if new_layout.size() >= old_layout.size() {
-                    allocator.grow(old_ptr, old_layout, new_layout)
-                } else {
-                    allocator.shrink(old_ptr, old_layout, new_layout)
-                }?
-            };
+        self.header.cap = new_cap as u32;
+        self.header.len = self.header.len.min(new_cap as u32);
 
-            let new_data_ptr = crate::raw::data_ptr::<Header<R, A>, T>(new_alloc.cast());
-            self.data = NonNull::new_unchecked(new_data_ptr);
-            self.header.cap = new_cap as u32;
+        let new_alloc = new_alloc?;
+
+        let new_data_ptr = crate::raw::data_ptr::<Header<R, A>, T>(new_alloc.cast());
+        self.data = NonNull::new_unchecked(new_data_ptr);
+
+        Ok(())
+    }
+
+    /// Attempts to move this raw vector into another allocator.
+    ///
+    /// All of the data is copied over into a new allocation in `new_allocator` after which
+    /// the old allocation is deallocated from `old_allocator`.
+    ///
+    /// If this method succeeds, `new_allocator` becomes the allocator currently used by this
+    /// raw vector.
+    ///
+    /// # Safety
+    ///
+    /// The provided `old_allocator` must be the one currently used by this raw vector.
+    ///
+    /// # Error
+    ///
+    /// If reallocation fails:
+    ///  - The vector remains in its current state, still associated to the old allocator.
+    ///  - An allocation error is returned.
+    #[cold]
+    pub unsafe fn try_reallocate_in<OldA: Allocator, NewA: Allocator>(
+        &mut self,
+        old_allocator: &OldA,
+        new_allocator: &NewA,
+        new_cap: usize,
+    ) -> Result<(), AllocError> {
+        type R = DefaultRefCount;
+
+        let new_layout = buffer_layout::<Header<R, NewA>, T>(new_cap).unwrap();
+
+        if new_cap == 0 {
+            self.deallocate(old_allocator);
+            return Ok(());
+        }
+
+        let new_alloc = if new_cap > 0 {
+            Some(new_allocator.allocate(new_layout)?)
+        } else {
+            None
+        };
+
+        let old_len = self.len();
+        if old_len > new_cap {
+            let mut elt = self.data_ptr().add(new_cap);
+            let end = self.data_ptr().add(old_len);
+            while elt < end {
+                ptr::drop_in_place(elt);
+                elt = elt.add(1)
+            }
+        }
+
+        let old_cap = self.capacity();
+
+        let old_base_ptr = if old_cap > 0 {
+            Some(self.base_ptr(old_allocator))
+        } else {
+            None
+        };
+
+        self.data = if let Some(new_alloc) = new_alloc {
+            let new_data_ptr = crate::raw::data_ptr::<Header<R, NewA>, T>(new_alloc.cast());
+
+            let copy_size = old_len.min(new_cap);
+            if copy_size > 0 {
+                let old_data_ptr = self.data_ptr();
+                ptr::copy_nonoverlapping(old_data_ptr, new_data_ptr, copy_size);
+            }
+
+            NonNull::new_unchecked(new_data_ptr)
+        } else {
+            NonNull::dangling()
+        };
+
+        self.header.cap = new_cap as u32;
+        self.header.len = self.header.len.min(new_cap as u32);
+
+        if let Some(old_base_ptr) = old_base_ptr {
+            let old_layout = buffer_layout::<Header<R, OldA>, T>(old_cap).unwrap();
+            old_allocator.deallocate(old_base_ptr, old_layout);
         }
 
         Ok(())
@@ -484,7 +579,7 @@ impl<T> RawVector<T> {
     ///
     /// # Safety
     ///
-    /// The provided allocator must be the one this raw vector was created with.
+    /// The provided allocator must be the one currently used by this raw vector.
     #[inline]
     pub unsafe fn try_reserve<A: Allocator>(&mut self, allocator: &A, additional: usize) -> Result<(), AllocError> {
         if self.remaining_capacity() < additional {
@@ -506,7 +601,7 @@ impl<T> RawVector<T> {
     ///
     /// # Safety
     ///
-    /// The provided allocator must be the one this raw vector was created with.
+    /// The provided allocator must be the one currently used by this raw vector.
     pub unsafe fn try_reserve_exact<A: Allocator>(&mut self, allocator: &A, additional: usize) -> Result<(), AllocError> {
         if self.remaining_capacity() >= additional {
             return Ok(());
@@ -522,7 +617,7 @@ impl<T> RawVector<T> {
     ///
     /// # Safety
     ///
-    /// The provided allocator must be the one this raw vector was created with.
+    /// The provided allocator must be the one currently used by this raw vector.
     pub unsafe fn shrink_to<A: Allocator>(&mut self, allocator: &A, min_capacity: usize)
     {
         let min_capacity = min_capacity.max(self.len());
@@ -537,7 +632,7 @@ impl<T> RawVector<T> {
     ///
     /// # Safety
     ///
-    /// The provided allocator must be the one this raw vector was created with.
+    /// The provided allocator must be the one currently used by this raw vector.
     pub unsafe fn shrink_to_fit<A: Allocator>(&mut self, allocator: &A)
     {
         self.shrink_to(allocator, self.len())
@@ -600,7 +695,7 @@ impl<T> RawVector<T> {
                 iter: range_slice.iter(),
                 vec: NonNull::from(self),
             }
-        }        
+        }
     }
 
     /// Creates a splicing iterator that replaces the specified range in the vector
@@ -945,6 +1040,17 @@ impl<T, A: Allocator> Vector<T, A> {
         Ok(Vector { raw, allocator })
     }
 
+    /// Attempts to move this vector into another allocator.
+    pub fn try_reallocate_in<NewA: Allocator>(&mut self, new_allocator: NewA, new_cap: usize) -> Result<Vector<T, NewA>, AllocError> {
+        unsafe {
+            self.raw.try_reallocate_in(&self.allocator, &new_allocator, new_cap)?;
+        }
+
+        Ok(Vector {
+            raw: mem::take(&mut self.raw),
+            allocator: new_allocator,
+        })
+    }
 
     #[inline(always)]
     /// Returns `true` if the vector contains no elements.
@@ -1598,7 +1704,7 @@ fn borrowd_dyn_alloc() {
     let mut ds1 = DataStructure::new();
     ds1.push(1);
 
-    let alloc = Global; 
+    let alloc = Global;
     let mut ds2 = DataStructure::new_in(&alloc);
     ds2.push(2);
 
@@ -1626,4 +1732,42 @@ fn drain1() {
     let start = if len > 0 { 16059518370053021184 % len } else { 0 };
     let end = 16059518370053021185.min(len);
     vectors[2].drain(start..end);
+}
+
+#[test]
+fn reallocate_in() {
+    pub use crate::alloc::Global;
+    use std::rc::Rc;
+
+    let alloc1 = Global;
+    let alloc2 = Global;
+
+    let mut vec = Vector::new_in(alloc1);
+    let val = Rc::new(());
+
+    for _ in 0..8 {
+        vec.push(val.clone());
+    }
+
+    assert_eq!(Rc::strong_count(&val), 9);
+
+    let mut vec = vec.try_reallocate_in(alloc2, 4).unwrap();
+
+    assert_eq!(vec.len(), 4);
+    assert_eq!(vec.capacity(), 4);
+    assert_eq!(Rc::strong_count(&val), 5);
+
+    for _ in 0..12 {
+        vec.push(val.clone());
+    }
+
+    assert_eq!(vec.len(), 16);
+    assert!(vec.capacity() >= 16);
+    assert_eq!(Rc::strong_count(&val), 17);
+
+    let vec = vec.try_reallocate_in(alloc1, 0).unwrap();
+
+    assert_eq!(vec.len(), 0);
+    assert_eq!(vec.capacity(), 0);
+    assert_eq!(Rc::strong_count(&val), 1);
 }
