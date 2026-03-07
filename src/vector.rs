@@ -470,13 +470,19 @@ impl<T> RawVector<T> {
             }
         };
 
-        self.header.cap = new_cap as u32;
+        // If the new capacity is lower than the length, we already dropped
+        // the elements after the new capacity, so make sure to write the
+        // length before propagating a potential allocation error.
         self.header.len = self.header.len.min(new_cap as u32);
 
+        // If allocation failed, we return an error here.
         let new_alloc = new_alloc?;
 
+        // The data and capacity, however must be only written once we know that
+        // the grow/shrink operation suceeded.
         let new_data_ptr = crate::raw::data_ptr::<Header<R, A>, T>(new_alloc.cast());
         self.data = NonNull::new_unchecked(new_data_ptr);
+        self.header.cap = new_cap as u32;
 
         Ok(())
     }
