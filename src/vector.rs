@@ -8,9 +8,9 @@ use crate::alloc::{AllocError, Allocator, Global};
 use crate::drain::Drain;
 use crate::into_iter::IntoIter;
 use crate::raw::{
-    self, buffer_layout, AtomicRefCount, BufferSize, Header, HeaderBuffer, RefCount, VecHeader, move_data,
+    self, buffer_layout, BufferSize, Header, HeaderBuffer, RefCount, VecHeader, move_data,
 };
-use crate::shared::{AtomicSharedVector, SharedVector};
+use crate::shared::{AtomicSharedVector, RefCountedVector, SharedVector};
 use crate::splice::Splice;
 use crate::{grow_amortized, DefaultRefCount};
 
@@ -1149,13 +1149,7 @@ impl<T, A: Allocator> Vector<T, A> {
     where
         A: Allocator + Clone,
     {
-        if self.raw.header.cap == 0 {
-            return SharedVector::try_with_capacity_in(0, self.allocator.clone()).unwrap();
-        }
-        unsafe {
-            let inner = self.into_header_buffer::<DefaultRefCount>();
-            SharedVector { inner }
-        }
+        self.into_shared_with_ref_count()
     }
 
     /// Make this vector immutable.
@@ -1167,12 +1161,21 @@ impl<T, A: Allocator> Vector<T, A> {
     where
         A: Allocator + Clone,
     {
+        self.into_shared_with_ref_count()
+    }
+
+    /// Make this vector immutable, with the reference counting scheme of the caller's choice.
+    #[inline]
+    pub(crate) fn into_shared_with_ref_count<R: RefCount>(self) -> RefCountedVector<T, R, A>
+    where
+        A: Allocator + Clone,
+    {
         if self.raw.header.cap == 0 {
-            return AtomicSharedVector::try_with_capacity_in(0, self.allocator.clone()).unwrap();
+            return RefCountedVector::try_with_capacity_in(0, self.allocator.clone()).unwrap();
         }
         unsafe {
-            let inner = self.into_header_buffer::<AtomicRefCount>();
-            AtomicSharedVector { inner }
+            let inner = self.into_header_buffer::<R>();
+            RefCountedVector { inner }
         }
     }
 
@@ -1493,6 +1496,8 @@ impl<T: PartialEq<T>, A: Allocator> PartialEq<&[T]> for Vector<T, A> {
     }
 }
 
+impl<T: Eq, A: Allocator> Eq for Vector<T, A> {}
+
 impl<T, A: Allocator> AsRef<[T]> for Vector<T, A> {
     fn as_ref(&self) -> &[T] {
         self.as_slice()
@@ -1508,6 +1513,15 @@ impl<T, A: Allocator> AsMut<[T]> for Vector<T, A> {
 impl<T> Default for Vector<T, Global> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl<T> FromIterator<T> for Vector<T, Global> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        let mut vector = Vector::new();
+        vector.extend(iter);
+
+        vector
     }
 }
 
@@ -1674,6 +1688,32 @@ fn basic_unique() {
     d.extend_from_slice(&[num(3), num(4)]);
 
     assert_eq!(d.as_slice(), &[num(0), num(1), num(2), num(3), num(4)]);
+}
+
+#[test]
+fn from_iterator() {
+    fn num(val: u32) -> Box<u32> {
+        Box::new(val)
+    }
+
+    let v: Vector<Box<u32>> = (0..4).map(num).collect();
+    assert_eq!(v.as_slice(), &[num(0), num(1), num(2), num(3)]);
+
+    let v: Vector<Box<u32>> = Vector::from_iter([]);
+    assert!(v.is_empty());
+
+    let v: SharedVector<Box<u32>> = (0..3).map(num).collect();
+    assert_eq!(v.as_slice(), &[num(0), num(1), num(2)]);
+
+    let v: AtomicSharedVector<Box<u32>> = (0..3).map(num).collect();
+    assert_eq!(v.as_slice(), &[num(0), num(1), num(2)]);
+
+    // Iterators without an upper bound on their size hint.
+    let v: AtomicSharedVector<Box<u32>> = (0..5).filter(|n| n % 2 == 0).map(num).collect();
+    assert_eq!(v.as_slice(), &[num(0), num(2), num(4)]);
+
+    let v: AtomicSharedVector<Box<u32>> = std::iter::empty().collect();
+    assert!(v.is_empty());
 }
 
 #[test]
