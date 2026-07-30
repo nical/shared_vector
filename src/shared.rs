@@ -667,6 +667,8 @@ impl<T: PartialEq<T>, R: RefCount, A: Allocator> PartialEq<&[T]> for RefCountedV
     }
 }
 
+impl<T: Eq, R: RefCount, A: Allocator> Eq for RefCountedVector<T, R, A> {}
+
 impl<T, R: RefCount, A: Allocator> AsRef<[T]> for RefCountedVector<T, R, A> {
     fn as_ref(&self) -> &[T] {
         self.as_slice()
@@ -676,6 +678,12 @@ impl<T, R: RefCount, A: Allocator> AsRef<[T]> for RefCountedVector<T, R, A> {
 impl<T, R: RefCount> Default for RefCountedVector<T, R, Global> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl<T, R: RefCount> FromIterator<T> for RefCountedVector<T, R, Global> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        Vector::from_iter(iter).into_shared_with_ref_count()
     }
 }
 
@@ -731,6 +739,12 @@ impl<T, R: RefCount, A: Allocator> Deref for RefCountedVector<T, R, A> {
 impl<T: Clone, R: RefCount, A: Allocator + Clone> DerefMut for RefCountedVector<T, R, A> {
     fn deref_mut(&mut self) -> &mut [T] {
         self.as_mut_slice()
+    }
+}
+
+impl<T: core::hash::Hash, R: RefCount, A: Allocator> core::hash::Hash for RefCountedVector<T, R, A> {
+    fn hash<H>(&self, state: &mut H) where H: core::hash::Hasher {
+        self.as_slice().hash(state)
     }
 }
 
@@ -834,6 +848,25 @@ fn grow() {
     b.push(num(3));
 
     assert_eq!(b.as_slice(), &[num(1), num(2), num(3)]);
+}
+
+#[test]
+fn eq_and_hash() {
+    use std::collections::HashMap;
+
+    let mut map: HashMap<AtomicSharedVector<Box<u32>>, u32> = HashMap::new();
+    map.insert((0..3).map(num).collect(), 1);
+    map.insert((0..2).map(num).collect(), 2);
+
+    let key: AtomicSharedVector<Box<u32>> = (0..3).map(num).collect();
+    assert_eq!(map.get(&key), Some(&1));
+    // Distinct buffers with the same contents hash and compare equal.
+    assert!(!key.ptr_eq(map.keys().find(|k| **k == key).unwrap()));
+
+    let mut set: std::collections::HashSet<SharedVector<u32>> = std::collections::HashSet::new();
+    set.insert(SharedVector::from_slice(&[1, 2]));
+    assert!(set.contains(&SharedVector::from_slice(&[1, 2])));
+    assert!(!set.contains(&SharedVector::from_slice(&[1, 3])));
 }
 
 #[test]
