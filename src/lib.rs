@@ -5,8 +5,10 @@ mod raw;
 mod shared;
 mod vector;
 mod drain;
+mod into_iter;
 mod splice;
 
+pub use into_iter::IntoIter;
 pub use raw::{AtomicRefCount, BufferSize, DefaultRefCount, RefCount};
 pub use shared::{AtomicSharedVector, RefCountedVector, SharedVector};
 pub use vector::{Vector, RawVector};

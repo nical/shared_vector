@@ -6,6 +6,7 @@ use core::ops::RangeBounds;
 
 use crate::alloc::{AllocError, Allocator, Global};
 use crate::drain::Drain;
+use crate::into_iter::IntoIter;
 use crate::raw::{
     self, buffer_layout, AtomicRefCount, BufferSize, Header, HeaderBuffer, RefCount, VecHeader, move_data,
 };
@@ -144,7 +145,7 @@ impl<T> RawVector<T> {
     }
 
     #[inline]
-    fn data_ptr(&self) -> *mut T {
+    pub(crate) fn data_ptr(&self) -> *mut T {
         self.data.as_ptr()
     }
 
@@ -1507,6 +1508,14 @@ impl<T, A: Allocator> AsMut<[T]> for Vector<T, A> {
 impl<T> Default for Vector<T, Global> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl<T, A: Allocator> IntoIterator for Vector<T, A> {
+    type Item = T;
+    type IntoIter = IntoIter<T, A>;
+    fn into_iter(self) -> IntoIter<T, A> {
+        IntoIter::new(self)
     }
 }
 
