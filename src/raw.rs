@@ -40,6 +40,71 @@ pub struct Header<R, A> {
     pub(crate) allocator: A,
 }
 
+/// Alignment of the shared empty header. Also the largest item and allocator
+/// alignment it can accommodate.
+const EMPTY_HEADER_ALIGN: usize = 64;
+
+/// The reference count stored in the shared empty header.
+///
+/// It is never incremented nor decremented, it only needs to be different from
+/// one so that the vectors pointing to the shared empty header are never
+/// considered unique (mutating them must allocate a real buffer).
+const EMPTY_HEADER_REF_COUNT: i32 = i32::MAX;
+
+/// Storage for the header shared by all of the empty reference counted vectors.
+///
+/// This mirrors the layout of `Header<R, A>` for any reference counting scheme
+/// `R` (they are all laid out like an `i32`, see `assert_ref_count_layout`) and
+/// any zero-sized allocator `A`. The padding covers the allocator field as well
+/// as the alignment requirements of the header itself.
+#[repr(C, align(64))]
+struct EmptyHeader {
+    vec: VecHeader,
+    ref_count: AtomicI32,
+    padding: [u8; EMPTY_HEADER_ALIGN - mem::size_of::<VecHeader>() - mem::size_of::<i32>()],
+}
+
+/// A single header shared by all empty reference counted vectors, which lets
+/// them exist without allocating.
+///
+/// The reference count is deliberately never touched (see `HeaderBuffer::add_ref`
+/// and `HeaderBuffer::release_ref`), so this static is only ever read from. That
+/// is what makes it safe to share it between threads and between reference
+/// counting schemes: a data race needs at least one writer.
+///
+/// The type of the reference count field is atomic only so that the static is
+/// placed in writable memory rather than read-only memory, out of caution: the
+/// vectors observe it through `UnsafeCell` and `AtomicI32` references.
+static EMPTY_HEADER: EmptyHeader = EmptyHeader {
+    vec: VecHeader { cap: 0, len: 0 },
+    ref_count: AtomicI32::new(EMPTY_HEADER_REF_COUNT),
+    padding: [0; EMPTY_HEADER_ALIGN - mem::size_of::<VecHeader>() - mem::size_of::<i32>()],
+};
+
+/// Returns the shared empty header for a vector of `T` items with the `R` reference
+/// counting scheme and the `A` allocator, or null if it can't be used with these
+/// parameters.
+///
+/// There can only be a single static header, so it can only stand in for allocators
+/// that have nothing to store, and its address has to satisfy the alignment
+/// requirements of both the header and the items.
+#[inline(always)]
+pub fn shared_empty_header<T, R: RefCount, A: Allocator>() -> *mut Header<R, A> {
+    if mem::size_of::<A>() != 0
+        || mem::needs_drop::<A>()
+        || mem::align_of::<A>() > EMPTY_HEADER_ALIGN
+        || mem::align_of::<T>() > EMPTY_HEADER_ALIGN
+    {
+        return ptr::null_mut();
+    }
+
+    debug_assert!(mem::size_of::<Header<R, A>>() <= mem::size_of::<EmptyHeader>());
+    debug_assert!(mem::align_of::<Header<R, A>>() <= EMPTY_HEADER_ALIGN);
+    debug_assert_eq!(mem::size_of::<R>(), mem::size_of::<i32>());
+
+    &EMPTY_HEADER as *const EmptyHeader as *mut Header<R, A>
+}
+
 impl RefCount for AtomicRefCount {
     #[inline]
     unsafe fn add_ref(&self) {
@@ -171,6 +236,41 @@ impl<T, R: RefCount, A: Allocator> HeaderBuffer<T, R, A> {
     pub fn allocator(&self) -> &A {
         unsafe { &self.header.as_ref().allocator }
     }
+
+    /// Returns true if this buffer is the header shared by all empty vectors.
+    ///
+    /// When `shared_empty_header` returns null (the parameters can't use the shared
+    /// header), this folds into a comparison of a non-null pointer against null.
+    #[inline]
+    pub fn is_shared_empty(&self) -> bool {
+        ptr::eq(
+            self.header.as_ptr() as *const u8,
+            shared_empty_header::<T, R, A>() as *const u8,
+        )
+    }
+
+    /// Adds a reference to this buffer.
+    #[inline]
+    pub unsafe fn add_ref(&self) {
+        // The shared empty header is immortal and shared between threads: its
+        // reference count must not be written to.
+        if self.is_shared_empty() {
+            return;
+        }
+
+        self.as_ref().ref_count.add_ref();
+    }
+
+    /// Removes a reference from this buffer, returning true if it was the last one
+    /// and the buffer must now be destroyed.
+    #[inline]
+    pub unsafe fn release_ref(&self) -> bool {
+        if self.is_shared_empty() {
+            return false;
+        }
+
+        self.as_ref().ref_count.release_ref()
+    }
 }
 
 pub unsafe fn move_data<T>(src_data: *mut T, src_vec: &mut VecHeader, dst_data: *mut T, dst_vec: &mut VecHeader) {
@@ -272,7 +372,7 @@ where
     A: Allocator,
 {
     if cap == 0 {
-        cap = 16;
+        cap = 8;
     }
 
     if cap > BufferSize::MAX as usize {
@@ -294,6 +394,52 @@ where
 
 pub unsafe fn header_from_data_ptr<H, T>(data_ptr: NonNull<T>) -> NonNull<H> {
     NonNull::new_unchecked((data_ptr.as_ptr() as *mut u8).sub(header_size::<H, T>()) as *mut H)
+}
+
+// The shared empty header stands in for `Header<R, A>` values, so their layouts have
+// to agree.
+#[test]
+fn empty_header_layout() {
+    pub use crate::alloc::Global;
+
+    type H = Header<AtomicRefCount, Global>;
+
+    assert!(mem::size_of::<H>() <= mem::size_of::<EmptyHeader>());
+    assert!(mem::align_of::<H>() <= mem::align_of::<EmptyHeader>());
+    assert_eq!(mem::size_of::<EmptyHeader>(), EMPTY_HEADER_ALIGN);
+
+    let header = H {
+        vec: VecHeader { cap: 0, len: 0 },
+        ref_count: AtomicRefCount::new(1),
+        allocator: Global,
+    };
+
+    let offset = |field: *const u8, base: *const u8| field as usize - base as usize;
+    let base = &header as *const H as *const u8;
+    let empty_base = &EMPTY_HEADER as *const EmptyHeader as *const u8;
+
+    assert_eq!(
+        offset(&header.vec as *const _ as *const u8, base),
+        offset(&EMPTY_HEADER.vec as *const _ as *const u8, empty_base),
+    );
+    assert_eq!(
+        offset(&header.ref_count as *const _ as *const u8, base),
+        offset(&EMPTY_HEADER.ref_count as *const _ as *const u8, empty_base),
+    );
+
+    // The header is only ever read from, its reference count is never touched.
+    let header = shared_empty_header::<u32, DefaultRefCount, Global>();
+    assert!(!header.is_null());
+    unsafe {
+        assert_eq!((*header).vec.cap, 0);
+        assert_eq!((*header).vec.len, 0);
+        assert_eq!((*header).ref_count.get(), EMPTY_HEADER_REF_COUNT);
+    }
+
+    // Items and allocators that are more aligned than the shared header can't use it.
+    #[repr(align(128))]
+    struct OverAligned;
+    assert!(shared_empty_header::<OverAligned, DefaultRefCount, Global>().is_null());
 }
 
 #[test]

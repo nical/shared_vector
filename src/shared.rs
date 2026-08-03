@@ -45,7 +45,10 @@ pub struct RefCountedVector<T, R: RefCount, A: Allocator = Global> {
 }
 
 impl<T, R: RefCount> RefCountedVector<T, R, Global> {
-    /// Creates an empty shared buffer without allocating memory.
+    /// Creates an empty shared vector.
+    ///
+    /// This does not allocate memory if the alignment of T is lower or equal
+    /// to 64 bytes.
     #[inline]
     pub fn new() -> RefCountedVector<T, R, Global> {
         Self::try_with_capacity_in(0, Global).unwrap()
@@ -68,7 +71,13 @@ impl<T, R: RefCount> RefCountedVector<T, R, Global> {
 }
 
 impl<T, R: RefCount, A: Allocator> RefCountedVector<T, R, A> {
-    /// Creates an empty vector without allocating memory.
+    /// Creates an empty shared vector.
+    ///
+    /// This does not allocate memory if all of the following requirements
+    /// are met:
+    /// - the allocator A is a zero-sized type,
+    /// - the allocator A does not implement `Drop`,
+    /// - align_of::<T>() <= 64.
     pub fn new_in(allocator: A) -> Self {
         Self::try_with_capacity_in(0, allocator).unwrap()
     }
@@ -82,6 +91,23 @@ impl<T, R: RefCount, A: Allocator> RefCountedVector<T, R, A> {
     #[inline]
     pub fn try_with_capacity_in(cap: usize, allocator: A) -> Result<Self, AllocError> {
         raw::assert_ref_count_layout::<R>();
+
+        if cap == 0 {
+            // Empty vectors don't need any storage, they can all point to the same
+            // immortal header instead of allocating one.
+            let empty = raw::shared_empty_header::<T, R, A>();
+            if !empty.is_null() {
+                // `shared_empty_header` only returns a non-null pointer for allocators
+                // that have nothing to store and nothing to drop.
+                debug_assert!(!mem::needs_drop::<A>());
+                drop(allocator);
+
+                return Ok(RefCountedVector {
+                    inner: unsafe { HeaderBuffer::from_raw(NonNull::new_unchecked(empty)) },
+                });
+            }
+        }
+
         unsafe {
             let (ptr, cap) = raw::allocate_header_buffer::<T, A>(cap, &allocator)?;
 
@@ -106,8 +132,11 @@ impl<T, R: RefCount, A: Allocator> RefCountedVector<T, R, A> {
     pub fn try_from_slice_in(slice: &[T], allocator: A) -> Result<Self, AllocError> where T: Clone {
         let mut v = Self::try_with_capacity_in(slice.len(), allocator)?;
 
-        unsafe {
-            raw::extend_from_slice_assuming_capacity(v.data_ptr(), v.vec_header_mut(), slice);
+        // An empty vector has no buffer of its own to write to.
+        if !slice.is_empty() {
+            unsafe {
+                raw::extend_from_slice_assuming_capacity(v.data_ptr(), v.vec_header_mut(), slice);
+            }
         }
 
         Ok(v)
@@ -149,7 +178,7 @@ impl<T, R: RefCount, A: Allocator> RefCountedVector<T, R, A> {
     #[inline]
     pub fn new_ref(&self) -> Self {
         unsafe {
-            self.inner.as_ref().ref_count.add_ref();
+            self.inner.add_ref();
             RefCountedVector {
                 inner: HeaderBuffer::from_raw(self.inner.header)
             }
@@ -168,6 +197,10 @@ impl<T, R: RefCount, A: Allocator> RefCountedVector<T, R, A> {
     ///
     /// When this function returns true, mutable methods and converting to a `Vector`
     /// is very fast (does not involve additional memory allocations or copies).
+    ///
+    /// Vectors that were created empty don't have a buffer of their own: they all
+    /// point to a shared header with a capacity of zero, so this returns false for
+    /// them until they are given some storage.
     #[inline]
     pub fn is_unique(&self) -> bool {
         unsafe { self.inner.as_ref().ref_count.get() == 1 }
@@ -236,7 +269,12 @@ impl<T, R: RefCount, A: Allocator> RefCountedVector<T, R, A> {
     }
 
     // SAFETY: call this only if the vector is unique.
+    //
+    // In particular this must not be called on a vector that points to the shared
+    // empty header: that header is immortal, shared between threads and lives in
+    // memory we don't own, so we must not even form a mutable reference to it.
     pub(crate) unsafe fn vec_header_mut(&mut self) -> &mut raw::VecHeader {
+        debug_assert!(!self.inner.is_shared_empty());
         &mut self.inner.as_mut().vec
     }
 
@@ -254,8 +292,14 @@ impl<T: Clone, R: RefCount, A: Allocator + Clone> RefCountedVector<T, R, A> {
         self.ensure_unique();
 
         unsafe {
-            let data = NonNull::new_unchecked(self.data_ptr());
             let header = self.vec_header().clone();
+            // The shared empty header is not a buffer we can hand over, but there is
+            // nothing to hand over either since it holds no items.
+            let data = if self.inner.is_shared_empty() {
+                NonNull::dangling()
+            } else {
+                NonNull::new_unchecked(self.data_ptr())
+            };
             let allocator = ptr::read(&self.inner.as_ref().allocator);
 
             mem::forget(self);
@@ -284,6 +328,12 @@ impl<T: Clone, R: RefCount, A: Allocator + Clone> RefCountedVector<T, R, A> {
 
     /// Removes the last element from the vector and returns it, or `None` if it is empty.
     pub fn pop(&mut self) -> Option<T> {
+        // Bail out before `ensure_unique`: there is nothing to remove and an empty
+        // vector may not have a buffer of its own to mutate.
+        if self.is_empty() {
+            return None;
+        }
+
         self.ensure_unique();
 
         unsafe {
@@ -343,6 +393,12 @@ impl<T: Clone, R: RefCount, A: Allocator + Clone> RefCountedVector<T, R, A> {
 
     /// Clones and appends the contents of the slice to the back of a collection.
     pub fn extend_from_slice(&mut self, slice: &[T]) {
+        // Bail out before `reserve`: an empty vector may not have a buffer of its
+        // own to mutate.
+        if slice.is_empty() {
+            return;
+        }
+
         self.reserve(slice.len());
         unsafe {
             raw::extend_from_slice_assuming_capacity(self.data_ptr(), self.vec_header_mut(), slice);
@@ -356,9 +412,14 @@ impl<T: Clone, R: RefCount, A: Allocator + Clone> RefCountedVector<T, R, A> {
         let (min, max) = iter.size_hint();
         self.reserve(max.unwrap_or(min));
 
-        unsafe {
-            if raw::extend_within_capacity(self.data_ptr(), self.vec_header_mut(), &mut iter) {
-                return;
+        // If the size hint was zero we may still be pointing to the shared empty
+        // header, which has no spare capacity and must not be mutated. Fall back to
+        // pushing the items one by one, which allocates a buffer as needed.
+        if self.remaining_capacity() > 0 {
+            unsafe {
+                if raw::extend_within_capacity(self.data_ptr(), self.vec_header_mut(), &mut iter) {
+                    return;
+                }
             }
         }
 
@@ -374,6 +435,10 @@ impl<T: Clone, R: RefCount, A: Allocator + Clone> RefCountedVector<T, R, A> {
     /// as it does not observaly affect most of the shared vector behavior, however
     /// it has a few niche use cases, for example to provoke copies earlier for more
     /// predictable performance or in some unsafe endeavors.
+    ///
+    /// Note that a vector with a capacity of zero has no storage of its own to begin
+    /// with (it points to a shared empty header), so this is a no-op for these and
+    /// `is_unique` still returns false afterwards.
     #[inline]
     pub fn ensure_unique(&mut self) {
         if !self.is_unique() {
@@ -427,11 +492,14 @@ impl<T: Clone, R: RefCount, A: Allocator + Clone> RefCountedVector<T, R, A> {
 
             let mut clone = Self::try_with_capacity_in(cap as usize, allocator)?;
 
-            raw::extend_from_slice_assuming_capacity(
-                clone.data_ptr(),
-                clone.vec_header_mut(),
-                self.as_slice()
-            );
+            // An empty clone has no buffer of its own to write to.
+            if len > 0 {
+                raw::extend_from_slice_assuming_capacity(
+                    clone.data_ptr(),
+                    clone.vec_header_mut(),
+                    self.as_slice()
+                );
+            }
 
             Ok(clone)
         }
@@ -503,7 +571,7 @@ impl<T: Clone, R: RefCount, A: Allocator + Clone> RefCountedVector<T, R, A> {
 
         if !is_unique || !enough_capacity {
             // Hopefully the least common case.
-            self.try_realloc_with_capacity(is_unique, additional)?;
+            self.try_realloc_with_capacity(is_unique, self.len().saturating_add(additional))?;
         }
 
         Ok(())
@@ -533,6 +601,12 @@ impl<T: Clone, R: RefCount, A: Allocator + Clone> RefCountedVector<T, R, A> {
     ///
     /// If `other is not unique, the elements are cloned instead of moved.
     pub fn append(&mut self, other: &mut Self) {
+        // Bail out before `reserve`: there is nothing to move and an empty vector may
+        // not have a buffer of its own to mutate.
+        if other.is_empty() {
+            return;
+        }
+
         self.reserve(other.len());
 
         unsafe {
@@ -575,7 +649,19 @@ impl<T: Clone, R: RefCount, A: Allocator + Clone> RefCountedVector<T, R, A> {
         is_unique: bool,
         new_cap: usize,
     ) -> Result<(), AllocError> {
+        debug_assert!(new_cap >= self.len());
+
         let allocator = self.inner.allocator().clone();
+
+        if new_cap == 0 && !raw::shared_empty_header::<T, R, A>().is_null() {
+            // Shrinking all the way down: hand the vector back to the shared empty
+            // header, releasing the current buffer if we own the last reference to it.
+            *self = Self::try_with_capacity_in(0, allocator)?;
+            return Ok(());
+        }
+
+        // Note: a capacity of zero means the vector points to the shared empty header
+        // which must not be reallocated (it is also never unique).
         if is_unique && self.capacity() > 0 {
             // The buffer is not large enough, we'll have to create a new one, however we
             // know that we have the only reference to it so we'll move the data with
@@ -604,7 +690,17 @@ impl<T: Clone, R: RefCount, A: Allocator + Clone> RefCountedVector<T, R, A> {
         // The slowest path, we pay for both the new allocation and the need to clone
         // each item one by one.
         let mut new_vec = Self::try_with_capacity_in(new_cap, allocator)?;
-        new_vec.extend_from_slice(self.as_slice());
+        if !self.is_empty() {
+            unsafe {
+                // `new_vec` was just created with a capacity of at least `self.len()`
+                // items and, being non-empty, it has a buffer of its own.
+                raw::extend_from_slice_assuming_capacity(
+                    new_vec.data_ptr(),
+                    new_vec.vec_header_mut(),
+                    self.as_slice(),
+                );
+            }
+        }
 
         mem::swap(self, &mut new_vec);
 
@@ -628,7 +724,7 @@ impl<T: Clone, R: RefCount, A: Allocator + Clone> RefCountedVector<T, R, A> {
 impl<T, R: RefCount, A: Allocator> Drop for RefCountedVector<T, R, A> {
     fn drop(&mut self) {
         unsafe {
-            if self.inner.as_ref().ref_count.release_ref() {
+            if self.inner.release_ref() {
                 let header = self.vec_header().clone();
                 // See the implementation of std Arc for the need to use this fence. Note that
                 // we only need it for the atomic reference counted version but I don't expect
@@ -880,4 +976,174 @@ fn ensure_unique_empty() {
 fn shrink_to_zero() {
     let mut v: SharedVector<u32> = SharedVector::new();
     v.shrink_to(0);
+}
+
+#[test]
+fn empty_vectors_share_a_single_header() {
+    fn check<R: RefCount>() {
+        let a: RefCountedVector<Box<u32>, R> = RefCountedVector::new();
+        let b: RefCountedVector<Box<u32>, R> = RefCountedVector::with_capacity(0);
+        let c: RefCountedVector<Box<u32>, R> = RefCountedVector::from_slice(&[]);
+        let d: RefCountedVector<Box<u32>, R> = Vector::new().into_shared_with_ref_count();
+        let e: RefCountedVector<Box<u32>, R> = RefCountedVector::new_in(Global);
+
+        for v in [&a, &b, &c, &d, &e] {
+            assert!(v.ptr_eq(&a));
+            assert_eq!(v.capacity(), 0);
+            assert_eq!(v.len(), 0);
+            assert!(v.is_empty());
+            assert!(v.as_slice().is_empty());
+            // The shared header is never uniquely owned.
+            assert!(!v.is_unique());
+        }
+    }
+
+    check::<DefaultRefCount>();
+    check::<AtomicRefCount>();
+
+    // Both reference counting schemes point to the same header, and the reference
+    // count is left alone when handles are created and dropped.
+    let a: SharedVector<u32> = SharedVector::new();
+    let b: AtomicSharedVector<u32> = AtomicSharedVector::new();
+    assert_eq!(a.inner.header.as_ptr() as usize, b.inner.header.as_ptr() as usize);
+
+    let count = unsafe { a.inner.as_ref().ref_count.get() };
+    {
+        let _clones = (a.new_ref(), a.new_ref(), b.new_ref());
+        assert_eq!(unsafe { a.inner.as_ref().ref_count.get() }, count);
+    }
+    assert_eq!(unsafe { a.inner.as_ref().ref_count.get() }, count);
+}
+
+#[test]
+fn empty_vector_operations() {
+    // Operations that don't need any storage must not write to the shared header,
+    // and the ones that do must move the vector off of it.
+    let mut v: SharedVector<Box<u32>> = SharedVector::new();
+
+    v.clear();
+    v.shrink_to_fit();
+    v.reserve(0);
+    v.reserve_exact(0);
+    v.extend_from_slice(&[]);
+    v.extend(std::iter::empty());
+    v.extend((0..0).map(num));
+    v.ensure_unique();
+    assert_eq!(v.pop(), None);
+    assert!(v.as_mut_slice().is_empty());
+    assert_eq!(v.capacity(), 0);
+    assert!(v.ptr_eq(&SharedVector::new()));
+
+    // An empty vector can be turned into a unique one without allocating.
+    let unique = v.new_ref().into_unique();
+    assert_eq!(unique.capacity(), 0);
+    assert!(unique.is_empty());
+
+    v.push(num(0));
+    assert!(v.capacity() >= 1);
+    assert!(v.is_unique());
+    assert_eq!(v.as_slice(), &[num(0)]);
+    assert!(!v.ptr_eq(&SharedVector::new()));
+
+    // Emptying a vector does not put it back on the shared header, it keeps its
+    // capacity like `Vec` does.
+    let mut v: SharedVector<Box<u32>> = SharedVector::new();
+    v.extend_from_slice(&[num(1), num(2)]);
+    let _other_ref = v.new_ref();
+    v.clear();
+    assert!(v.is_empty());
+    assert!(v.capacity() >= 2);
+    assert!(!v.ptr_eq(&SharedVector::new()));
+
+    // Shrinking all the way back down does, though.
+    v.shrink_to_fit();
+    assert_eq!(v.capacity(), 0);
+    assert!(v.ptr_eq(&SharedVector::new()));
+}
+
+#[test]
+fn empty_vectors_on_multiple_threads() {
+    // The shared header is not synchronized, it relies on never being written to.
+    // Hammer it from several threads with both reference counting schemes.
+    let threads: Vec<_> = (0..8)
+        .map(|_| {
+            std::thread::spawn(|| {
+                for i in 0..1000u32 {
+                    let a: AtomicSharedVector<u32> = AtomicSharedVector::new();
+                    let b = a.new_ref();
+                    assert!(a.is_empty() && b.is_empty());
+
+                    // Non-atomic shared vectors can't be sent between threads but
+                    // nothing prevents each thread from creating its own.
+                    let c: SharedVector<u32> = SharedVector::new();
+                    let d = c.clone();
+                    assert!(c.ptr_eq(&d));
+
+                    let mut e = a.new_ref();
+                    e.push(i);
+                    assert_eq!(e.as_slice(), &[i]);
+                }
+            })
+        })
+        .collect();
+
+    for thread in threads {
+        thread.join().unwrap();
+    }
+
+    let v: AtomicSharedVector<u32> = AtomicSharedVector::new();
+    assert_eq!(unsafe { v.inner.as_ref().ref_count.get() }, i32::MAX);
+}
+
+#[test]
+fn empty_vector_with_non_zero_sized_allocator() {
+    // The shared header cannot store an allocator, so vectors using one that isn't
+    // zero-sized still allocate a buffer of their own.
+    #[derive(Clone)]
+    struct TaggedAllocator(#[allow(dead_code)] u32);
+
+    unsafe impl crate::alloc::Allocator for TaggedAllocator {
+        fn allocate(&self, layout: core::alloc::Layout) -> Result<NonNull<[u8]>, AllocError> {
+            Global.allocate(layout)
+        }
+        unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: core::alloc::Layout) {
+            Global.deallocate(ptr, layout)
+        }
+    }
+
+    let a: SharedVector<u32, TaggedAllocator> = SharedVector::new_in(TaggedAllocator(1));
+    let b: SharedVector<u32, TaggedAllocator> = SharedVector::new_in(TaggedAllocator(2));
+    assert!(!a.ptr_eq(&b));
+    assert!(a.is_unique());
+    assert!(a.is_empty());
+
+    let mut a = a;
+    a.extend_from_slice(&[1, 2, 3]);
+    assert_eq!(a.as_slice(), &[1, 2, 3]);
+}
+
+#[test]
+fn empty_vector_of_over_aligned_items() {
+    // Items that are more aligned than the shared header also fall back to allocating.
+    #[repr(align(128))]
+    #[derive(Clone, Debug, PartialEq)]
+    struct OverAligned(u32);
+
+    let a: SharedVector<OverAligned> = SharedVector::new();
+    assert!(a.is_empty());
+    assert!(a.as_slice().is_empty());
+
+    let mut a = a;
+    a.push(OverAligned(1));
+    assert_eq!(a.as_slice(), &[OverAligned(1)]);
+
+    // Items aligned to at most the shared header's alignment can use it.
+    #[repr(align(64))]
+    #[derive(Clone, Debug, PartialEq)]
+    struct Aligned64(u32);
+
+    let b: SharedVector<Aligned64> = SharedVector::new();
+    assert!(b.ptr_eq(&SharedVector::new()));
+    assert!(b.as_slice().is_empty());
+    assert_eq!(b.as_slice().as_ptr() as usize % 64, 0);
 }
