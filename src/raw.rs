@@ -1,3 +1,5 @@
+#![allow(private_bounds)]
+
 use core::alloc::Layout;
 use core::cell::UnsafeCell;
 use core::marker::PhantomData;
@@ -12,9 +14,22 @@ pub use crate::alloc::{AllocError, Allocator};
 
 pub type BufferSize = u32;
 
-pub trait RefCount {
-    unsafe fn add_ref(&self);
-    unsafe fn release_ref(&self) -> bool;
+/// Prevents users of the crate from implementing their own reference counts.
+trait Sealed {}
+
+/// The reference count used by the vector.
+///
+/// This trait exists to allow atomic and non-atomic reference counts.
+/// Users of this crate are not intended to swap the provided RefCount
+/// implementations with their own.
+///
+/// # Safety
+///
+/// Implementations must count references exactly. `get` must return the current
+/// number of references and `release_ref` must return true only when it reaches zero.
+pub unsafe trait RefCount: Sealed {
+    fn add_ref(&self);
+    fn release_ref(&self) -> bool;
     fn new(count: i32) -> Self;
     fn get(&self) -> i32;
 }
@@ -105,16 +120,18 @@ pub fn shared_empty_header<T, R: RefCount, A: Allocator>() -> *mut Header<R, A> 
     &EMPTY_HEADER as *const EmptyHeader as *mut Header<R, A>
 }
 
-impl RefCount for AtomicRefCount {
+impl Sealed for AtomicRefCount {}
+
+unsafe impl RefCount for AtomicRefCount {
     #[inline]
-    unsafe fn add_ref(&self) {
+    fn add_ref(&self) {
         // Relaxed ordering is OK since the presence of the existing reference
         // prevents threads from deleting the buffer.
         self.0.fetch_add(1, Relaxed);
     }
 
     #[inline]
-    unsafe fn release_ref(&self) -> bool {
+    fn release_ref(&self) -> bool {
         self.0.fetch_sub(1, Release) == 1
     }
 
@@ -129,17 +146,23 @@ impl RefCount for AtomicRefCount {
     }
 }
 
-impl RefCount for DefaultRefCount {
+impl Sealed for DefaultRefCount {}
+
+unsafe impl RefCount for DefaultRefCount {
     #[inline]
-    unsafe fn add_ref(&self) {
-        *self.0.get() += 1;
+    fn add_ref(&self) {
+        unsafe {
+            *self.0.get() += 1;
+        }
     }
 
     #[inline]
-    unsafe fn release_ref(&self) -> bool {
-        let count = self.0.get();
-        *count -= 1;
-        *count == 0
+    fn release_ref(&self) -> bool {
+        unsafe {
+            let count = self.0.get();
+            *count -= 1;
+            *count == 0
+        }
     }
 
     #[inline]
